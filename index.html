@@ -1,0 +1,2860 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="theme-color" content="#4F46E5">
+    <meta name="description" content="Servisteyim - Araç sahipleri ve sürücüleri buluşturan gelişmiş platform">
+    <title>Servisteyim</title>
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <style>
+        .line-clamp-3 {
+            display: -webkit-box;
+            -webkit-line-clamp: 3;
+            -webkit-box-orient: vertical;
+            overflow: hidden;
+        }
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+        .animate-spin {
+            animation: spin 1s linear infinite;
+        }
+        .map-container {
+            height: 300px;
+            width: 100%;
+            border-radius: 8px;
+            overflow: hidden;
+        }
+        .sponsored-badge {
+            background: linear-gradient(135deg, #FFD700 0%, #FFA500 100%);
+            animation: pulse 2s ease-in-out infinite;
+        }
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.8; }
+        }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect } = React;
+
+        // ==================== DATABASE ====================
+        class BoltDB {
+            constructor() {
+                this.dbName = 'servisteyim-db-v2';
+                this.version = 3;
+                this.db = null;
+            }
+
+            async init() {
+                return new Promise((resolve, reject) => {
+                    const request = indexedDB.open(this.dbName, this.version);
+                    request.onerror = () => reject(request.error);
+                    request.onsuccess = () => {
+                        this.db = request.result;
+                        resolve();
+                    };
+                    request.onupgradeneeded = (event) => {
+                        const db = event.target.result;
+                        
+                        // Users Store
+                        if (!db.objectStoreNames.contains('users')) {
+                            const userStore = db.createObjectStore('users', { keyPath: 'id' });
+                            userStore.createIndex('phoneOrEmail', 'phoneOrEmail', { unique: true });
+                        }
+                        
+                        // Job Posts Store
+                        if (!db.objectStoreNames.contains('job_posts')) {
+                            const jobStore = db.createObjectStore('job_posts', { keyPath: 'id' });
+                            jobStore.createIndex('userId', 'userId', { unique: false });
+                            jobStore.createIndex('category', 'category', { unique: false });
+                            jobStore.createIndex('createdAt', 'createdAt', { unique: false });
+                        }
+                        
+                        // Messages Store
+                        if (!db.objectStoreNames.contains('messages')) {
+                            const msgStore = db.createObjectStore('messages', { keyPath: 'id' });
+                            msgStore.createIndex('senderId', 'senderId', { unique: false });
+                            msgStore.createIndex('receiverId', 'receiverId', { unique: false });
+                            msgStore.createIndex('jobPostId', 'jobPostId', { unique: false });
+                        }
+                        
+                        // Favorites Store
+                        if (!db.objectStoreNames.contains('favorites')) {
+                            const favStore = db.createObjectStore('favorites', { keyPath: 'id' });
+                            favStore.createIndex('userId', 'userId', { unique: false });
+                            favStore.createIndex('targetId', 'targetId', { unique: false });
+                        }
+                        
+                        // Reports Store
+                        if (!db.objectStoreNames.contains('reports')) {
+                            const reportStore = db.createObjectStore('reports', { keyPath: 'id' });
+                            reportStore.createIndex('reporterId', 'reporterId', { unique: false });
+                            reportStore.createIndex('status', 'status', { unique: false });
+                        }
+                    };
+                });
+            }
+
+            // User Operations
+            async addUser(user) {
+                if (!this.db) throw new Error('DB not initialized');
+                return new Promise((resolve, reject) => {
+                    const transaction = this.db.transaction(['users'], 'readwrite');
+                    const store = transaction.objectStore('users');
+                    const request = store.add(user);
+                    request.onsuccess = () => resolve();
+                    request.onerror = () => reject(request.error);
+                });
+            }
+
+            async getUserByPhoneOrEmail(phoneOrEmail) {
+                if (!this.db) throw new Error('DB not initialized');
+                return new Promise((resolve, reject) => {
+                    const transaction = this.db.transaction(['users'], 'readonly');
+                    const store = transaction.objectStore('users');
+                    const index = store.index('phoneOrEmail');
+                    const request = index.get(phoneOrEmail);
+                    request.onsuccess = () => resolve(request.result || null);
+                    request.onerror = () => reject(request.error);
+                });
+            }
+
+            async getUserById(userId) {
+                if (!this.db) throw new Error('DB not initialized');
+                return new Promise((resolve, reject) => {
+                    const transaction = this.db.transaction(['users'], 'readonly');
+                    const store = transaction.objectStore('users');
+                    const request = store.get(userId);
+                    request.onsuccess = () => resolve(request.result || null);
+                    request.onerror = () => reject(request.error);
+                });
+            }
+
+            async updateUser(user) {
+                if (!this.db) throw new Error('DB not initialized');
+                return new Promise((resolve, reject) => {
+                    const transaction = this.db.transaction(['users'], 'readwrite');
+                    const store = transaction.objectStore('users');
+                    const request = store.put(user);
+                    request.onsuccess = () => resolve();
+                    request.onerror = () => reject(request.error);
+                });
+            }
+
+            // Job Post Operations
+            async addJobPost(post) {
+                if (!this.db) throw new Error('DB not initialized');
+                return new Promise((resolve, reject) => {
+                    const transaction = this.db.transaction(['job_posts'], 'readwrite');
+                    const store = transaction.objectStore('job_posts');
+                    const request = store.add(post);
+                    request.onsuccess = () => resolve();
+                    request.onerror = () => reject(request.error);
+                });
+            }
+
+            async getAllJobPosts() {
+                if (!this.db) throw new Error('DB not initialized');
+                return new Promise((resolve, reject) => {
+                    const transaction = this.db.transaction(['job_posts'], 'readonly');
+                    const store = transaction.objectStore('job_posts');
+                    const request = store.getAll();
+                    request.onsuccess = () => resolve(request.result);
+                    request.onerror = () => reject(request.error);
+                });
+            }
+
+            async getJobPostById(postId) {
+                if (!this.db) throw new Error('DB not initialized');
+                return new Promise((resolve, reject) => {
+                    const transaction = this.db.transaction(['job_posts'], 'readonly');
+                    const store = transaction.objectStore('job_posts');
+                    const request = store.get(postId);
+                    request.onsuccess = () => resolve(request.result || null);
+                    request.onerror = () => reject(request.error);
+                });
+            }
+
+            async updateJobPost(post) {
+                if (!this.db) throw new Error('DB not initialized');
+                return new Promise((resolve, reject) => {
+                    const transaction = this.db.transaction(['job_posts'], 'readwrite');
+                    const store = transaction.objectStore('job_posts');
+                    const request = store.put(post);
+                    request.onsuccess = () => resolve();
+                    request.onerror = () => reject(request.error);
+                });
+            }
+
+            async deleteJobPost(postId) {
+                if (!this.db) throw new Error('DB not initialized');
+                return new Promise((resolve, reject) => {
+                    const transaction = this.db.transaction(['job_posts'], 'readwrite');
+                    const store = transaction.objectStore('job_posts');
+                    const request = store.delete(postId);
+                    request.onsuccess = () => resolve();
+                    request.onerror = () => reject(request.error);
+                });
+            }
+
+            // Message Operations
+            async addMessage(message) {
+                if (!this.db) throw new Error('DB not initialized');
+                return new Promise((resolve, reject) => {
+                    const transaction = this.db.transaction(['messages'], 'readwrite');
+                    const store = transaction.objectStore('messages');
+                    const request = store.add(message);
+                    request.onsuccess = () => resolve();
+                    request.onerror = () => reject(request.error);
+                });
+            }
+
+            async getMessages(userId) {
+                if (!this.db) throw new Error('DB not initialized');
+                return new Promise((resolve, reject) => {
+                    const transaction = this.db.transaction(['messages'], 'readonly');
+                    const store = transaction.objectStore('messages');
+                    const request = store.getAll();
+                    request.onsuccess = () => {
+                        const allMessages = request.result;
+                        const userMessages = allMessages.filter(msg => 
+                            msg.senderId === userId || msg.receiverId === userId
+                        );
+                        resolve(userMessages);
+                    };
+                    request.onerror = () => reject(request.error);
+                });
+            }
+
+            async markMessageAsRead(messageId) {
+                if (!this.db) throw new Error('DB not initialized');
+                const message = await new Promise((resolve, reject) => {
+                    const transaction = this.db.transaction(['messages'], 'readonly');
+                    const store = transaction.objectStore('messages');
+                    const request = store.get(messageId);
+                    request.onsuccess = () => resolve(request.result);
+                    request.onerror = () => reject(request.error);
+                });
+                
+                if (message) {
+                    message.read = true;
+                    return this.updateMessage(message);
+                }
+            }
+
+            async updateMessage(message) {
+                if (!this.db) throw new Error('DB not initialized');
+                return new Promise((resolve, reject) => {
+                    const transaction = this.db.transaction(['messages'], 'readwrite');
+                    const store = transaction.objectStore('messages');
+                    const request = store.put(message);
+                    request.onsuccess = () => resolve();
+                    request.onerror = () => reject(request.error);
+                });
+            }
+
+            // Favorite Operations
+            async addFavorite(favorite) {
+                if (!this.db) throw new Error('DB not initialized');
+                return new Promise((resolve, reject) => {
+                    const transaction = this.db.transaction(['favorites'], 'readwrite');
+                    const store = transaction.objectStore('favorites');
+                    const request = store.add(favorite);
+                    request.onsuccess = () => resolve();
+                    request.onerror = () => reject(request.error);
+                });
+            }
+
+            async removeFavorite(favoriteId) {
+                if (!this.db) throw new Error('DB not initialized');
+                return new Promise((resolve, reject) => {
+                    const transaction = this.db.transaction(['favorites'], 'readwrite');
+                    const store = transaction.objectStore('favorites');
+                    const request = store.delete(favoriteId);
+                    request.onsuccess = () => resolve();
+                    request.onerror = () => reject(request.error);
+                });
+            }
+
+            async getUserFavorites(userId) {
+                if (!this.db) throw new Error('DB not initialized');
+                return new Promise((resolve, reject) => {
+                    const transaction = this.db.transaction(['favorites'], 'readonly');
+                    const store = transaction.objectStore('favorites');
+                    const index = store.index('userId');
+                    const request = index.getAll(userId);
+                    request.onsuccess = () => resolve(request.result);
+                    request.onerror = () => reject(request.error);
+                });
+            }
+
+            // Report Operations
+            async addReport(report) {
+                if (!this.db) throw new Error('DB not initialized');
+                return new Promise((resolve, reject) => {
+                    const transaction = this.db.transaction(['reports'], 'readwrite');
+                    const store = transaction.objectStore('reports');
+                    const request = store.add(report);
+                    request.onsuccess = () => resolve();
+                    request.onerror = () => reject(request.error);
+                });
+            }
+
+            async getAllReports() {
+                if (!this.db) throw new Error('DB not initialized');
+                return new Promise((resolve, reject) => {
+                    const transaction = this.db.transaction(['reports'], 'readonly');
+                    const store = transaction.objectStore('reports');
+                    const request = store.getAll();
+                    request.onsuccess = () => resolve(request.result);
+                    request.onerror = () => reject(request.error);
+                });
+            }
+
+            async updateReport(report) {
+                if (!this.db) throw new Error('DB not initialized');
+                return new Promise((resolve, reject) => {
+                    const transaction = this.db.transaction(['reports'], 'readwrite');
+                    const store = transaction.objectStore('reports');
+                    const request = store.put(report);
+                    request.onsuccess = () => resolve();
+                    request.onerror = () => reject(request.error);
+                });
+            }
+        }
+
+        const db = new BoltDB();
+
+        // ==================== UTILITIES ====================
+        const generateId = () => Date.now() + Math.random().toString(36).substr(2, 9);
+
+        const validateEmail = (email) => {
+            const allowedDomains = ['@gmail.com', '@hotmail.com', '@outlook.com'];
+            return allowedDomains.some(domain => email.toLowerCase().endsWith(domain));
+        };
+
+        const isAdminEmail = (email) => {
+            return email.toLowerCase() === 'admin@admin.com';
+        };
+
+        // ==================== ICONS ====================
+        const HomeIcon = () => (
+            <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6" />
+            </svg>
+        );
+
+        const PlusIcon = () => (
+            <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+            </svg>
+        );
+
+        const UserIcon = () => (
+            <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
+            </svg>
+        );
+
+        const InfoIcon = () => (
+            <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+            </svg>
+        );
+
+        const MessageIcon = () => (
+            <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
+            </svg>
+        );
+
+        const HeartIcon = ({ filled }) => (
+            <svg className="w-6 h-6" fill={filled ? "currentColor" : "none"} stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4.318 6.318a4.5 4.5 0 000 6.364L12 20.364l7.682-7.682a4.5 4.5 0 00-6.364-6.364L12 7.636l-1.318-1.318a4.5 4.5 0 00-6.364 0z" />
+            </svg>
+        );
+
+        const MapIcon = () => (
+            <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 20l-5.447-2.724A1 1 0 013 16.382V5.618a1 1 0 011.447-.894L9 7m0 13l6-3m-6 3V7m6 10l4.553 2.276A1 1 0 0021 18.382V7.618a1 1 0 00-.553-.894L15 4m0 13V4m0 0L9 7" />
+            </svg>
+        );
+
+        const FlagIcon = () => (
+            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 21v-4m0 0V5a2 2 0 012-2h6.5l1 1H21l-3 6 3 6h-8.5l-1-1H5a2 2 0 00-2 2zm9-13.5V9" />
+            </svg>
+        );
+
+        const FilterIcon = () => (
+            <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 4a1 1 0 011-1h16a1 1 0 011 1v2.586a1 1 0 01-.293.707l-6.414 6.414a1 1 0 00-.293.707V17l-4 4v-6.586a1 1 0 00-.293-.707L3.293 7.293A1 1 0 013 6.586V4z" />
+            </svg>
+        );
+
+        const StarIcon = ({ filled }) => (
+            <svg className="w-5 h-5" fill={filled ? "currentColor" : "none"} stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11.049 2.927c.3-.921 1.603-.921 1.902 0l1.519 4.674a1 1 0 00.95.69h4.915c.969 0 1.371 1.24.588 1.81l-3.976 2.888a1 1 0 00-.363 1.118l1.518 4.674c.3.922-.755 1.688-1.538 1.118l-3.976-2.888a1 1 0 00-1.176 0l-3.976 2.888c-.783.57-1.838-.197-1.538-1.118l1.518-4.674a1 1 0 00-.363-1.118l-3.976-2.888c-.784-.57-.38-1.81.588-1.81h4.914a1 1 0 00.951-.69l1.519-4.674z" />
+            </svg>
+        );
+
+        const ShieldIcon = () => (
+            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
+            </svg>
+        );
+
+        // ==================== AUTH PANEL ====================
+        function AuthPanel({ onLogin }) {
+            const [isLogin, setIsLogin] = useState(true);
+            const [formData, setFormData] = useState({
+                phoneOrEmail: '',
+                password: '',
+                name: '',
+                surname: ''
+            });
+            const [error, setError] = useState('');
+            const [termsAccepted, setTermsAccepted] = useState(false);
+            const [privacyAccepted, setPrivacyAccepted] = useState(false);
+            const [showTerms, setShowTerms] = useState(false);
+
+            const handleSubmit = async (e) => {
+                e.preventDefault();
+                setError('');
+
+                try {
+                    if (isLogin) {
+                        // Login
+                        
+                        
+                        const user = await db.getUserByPhoneOrEmail(formData.phoneOrEmail);
+                        if (!user || user.password !== formData.password) {
+                            setError('Kullanıcı adı veya şifre hatalı!');
+                            return;
+                        }
+                        onLogin(user);
+                    } else {
+                        // Register
+                        if (formData.phoneOrEmail === 'admin@admin.com') {
+                            setError('Bu e-posta adresi ile kayıt olunamaz.');
+                            return;
+                        }
+
+                        // Email validation
+                        if (formData.phoneOrEmail.includes('@')) {
+                            if (!validateEmail(formData.phoneOrEmail)) {
+                                setError('Sadece @gmail.com, @hotmail.com veya @outlook.com e-posta adresleri ile kayıt olabilirsiniz.');
+                                return;
+                            }
+                        }
+
+                        const existingUser = await db.getUserByPhoneOrEmail(formData.phoneOrEmail);
+                        if (existingUser) {
+                            setError('Bu telefon/e-posta zaten kayıtlı!');
+                            return;
+                        }
+
+                        const newUser = {
+                            id: generateId(),
+                            phoneOrEmail: formData.phoneOrEmail,
+                            password: formData.password,
+                            name: formData.name,
+                            surname: formData.surname,
+                            about: '',
+                            profileImage: null,
+                            emailVerified: false,
+                            phoneVerified: false,
+                            idVerified: false,
+                            isSponsored: false,
+                            licenseClass: '',
+                            vehicleSeats: '',
+                            vehicleType: '',
+                            experienceYears: '',
+                            createdAt: new Date().toISOString()
+                        };
+
+                        await db.addUser(newUser);
+                        onLogin(newUser);
+                    }
+                } catch (err) {
+                    console.error(err);
+                    setError('Bir hata oluştu. Lütfen tekrar deneyin.');
+                }
+            };
+
+            if (showTerms) {
+                return (
+                    <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 p-4">
+                        <div className="max-w-2xl mx-auto bg-white rounded-2xl shadow-xl p-6">
+                            <h2 className="text-2xl font-bold text-gray-800 mb-4">Kullanıcı Sözleşmesi</h2>
+                            <div className="prose prose-sm max-h-96 overflow-y-auto mb-4 text-gray-700">
+                                <h3>1. Hizmet Tanımı</h3>
+                                <p>Servisteyim, araç sahipleri, sürücüler ve servis sorumluları için tasarlanmış, iş odaklı bir dijital pazaryeri platformudur. Uygulama; kullanıcıların güvenilir, hızlı ve kolay bir şekilde iş bulmasını, ilan paylaşmasını ve sektörel ihtiyaçlarına yönelik çözümlere erişmesini sağlar.</p>
+                                
+                                <h3>2. Kullanıcı Yükümlülükleri</h3>
+                                <p>Kullanıcılar, platform üzerinde paylaştıkları bilgilerin doğru ve güncel olmasından sorumludur. Yanıltıcı, yanlış veya başkalarına ait bilgiler paylaşmak yasaktır.</p>
+                                
+                                <h3>3. İlan Süresi ve Yönetimi</h3>
+                                <p>Yayınlanan ilanlar 14 gün boyunca ana akışta görüntülenir. Bu sürenin sonunda ilanlar otomatik olarak ana akıştan kaldırılır ancak kullanıcının "İlanlarım" bölümünde görünmeye devam eder.</p>
+                                
+                                <h3>4. Yasaklı Davranışlar</h3>
+                                <p>Platform üzerinde spam, taciz, dolandırıcılık veya yasadışı faaliyetler kesinlikle yasaktır. Bu tür davranışlar hesabın kalıcı olarak kapatılmasına neden olabilir.</p>
+                                
+                                <h3>5. Sorumluluk Reddi</h3>
+                                <p>Servisteyim, kullanıcılar arasındaki anlaşmalardan ve işlemlerden sorumlu değildir. Platform sadece aracılık hizmeti sunar.</p>
+                                
+                                <h3>6. Değişiklikler</h3>
+                                <p>Bu sözleşme zaman zaman güncellenebilir. Önemli değişiklikler kullanıcılara bildirilecektir.</p>
+                            </div>
+                            <button
+                                onClick={() => setShowTerms(false)}
+                                className="w-full bg-indigo-600 text-white py-3 rounded-lg font-medium hover:bg-indigo-700"
+                            >
+                                Kapat
+                            </button>
+                        </div>
+                    </div>
+                );
+            }
+
+            return (
+                <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 flex items-center justify-center p-4">
+                    <div className="w-full max-w-md">
+                        <div className="text-center mb-8">
+                            <div className="inline-flex items-center justify-center w-20 h-20 bg-indigo-600 rounded-full mb-4">
+                                <span className="text-4xl"></span>
+                            </div>
+                            <h1 className="text-4xl font-bold text-gray-800 mb-2">Servisteyim</h1>
+                            <p className="text-gray-600">Araç sahipleri ve sürücüleri buluşturan platform</p>
+                        </div>
+
+                        <div className="bg-white rounded-2xl shadow-xl p-6">
+                            <div className="flex mb-6 bg-gray-100 rounded-lg p-1">
+                                <button
+                                    onClick={() => setIsLogin(true)}
+                                    className={`flex-1 py-2 rounded-md font-medium transition-all ${isLogin ? 'bg-indigo-600 text-white' : 'text-gray-600'}`}
+                                >
+                                    Giriş Yap
+                                </button>
+                                <button
+                                    onClick={() => setIsLogin(false)}
+                                    className={`flex-1 py-2 rounded-md font-medium transition-all ${!isLogin ? 'bg-indigo-600 text-white' : 'text-gray-600'}`}
+                                >
+                                    Kayıt Ol
+                                </button>
+                            </div>
+
+                            <form onSubmit={handleSubmit} className="space-y-4">
+                                {!isLogin && (
+                                    <>
+                                        <input
+                                            type="text"
+                                            placeholder="Ad"
+                                            value={formData.name}
+                                            onChange={(e) => setFormData({...formData, name: e.target.value})}
+                                            required
+                                            className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
+                                        />
+                                        
+                                        <input
+                                            type="text"
+                                            placeholder="Soyad"
+                                            value={formData.surname}
+                                            onChange={(e) => setFormData({...formData, surname: e.target.value})}
+                                            required
+                                            className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
+                                        />
+                                    </>
+                                )}
+                                <input
+                                    type="text"
+                                    placeholder="Telefon veya E-posta"
+                                    value={formData.phoneOrEmail}
+                                    onChange={(e) => setFormData({...formData, phoneOrEmail: e.target.value})}
+                                    required
+                                    className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
+                                />
+                                <input
+                                    type="password"
+                                    placeholder="Şifre"
+                                    value={formData.password}
+                                    onChange={(e) => setFormData({...formData, password: e.target.value})}
+                                    required
+                                    className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
+                                />
+                                {error && (
+                                    <div className="text-red-600 text-sm bg-red-50 p-3 rounded-lg">
+                                        {error}
+                                    </div>
+                                )}
+                                <button
+                                    type="submit"
+                                    className="w-full bg-indigo-600 text-white py-3 rounded-lg font-medium hover:bg-indigo-700 transition-colors"
+                                >
+                                    {isLogin ? 'Giriş Yap' : 'Kayıt Ol'}
+                                </button>
+                            </form>
+{!isLogin && (
+                                            <div className="space-y-2">
+                                                <label className="flex items-start gap-2 text-sm text-gray-700">
+                                                    <input
+                                                        type="checkbox"
+                                                        checked={termsAccepted}
+                                                        onChange={(e) => setTermsAccepted(e.target.checked)}
+                                                        className="mt-1"
+                                                    />
+                                                    <span>Kullanıcı Sözleşmesini okudum ve kabul ediyorum.</span>
+                                                </label>
+                                                <label className="flex items-start gap-2 text-sm text-gray-700">
+                                                    <input
+                                                        type="checkbox"
+                                                        checked={privacyAccepted}
+                                                        onChange={(e) => setPrivacyAccepted(e.target.checked)}
+                                                        className="mt-1"
+                                                    />
+                                                    <span>Gizlilik Politikasını okudum ve kabul ediyorum.</span>
+                                                </label>
+                                            </div>
+                                        )}
+                            <div className="mt-4 text-center">
+                                <button
+                                    onClick={() => setShowTerms(true)}
+                                    className="text-sm text-indigo-600 hover:text-indigo-700"
+                                >
+                                    Kullanıcı Sözleşmesi ve Gizlilik Politikası
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            );
+        }
+
+        // ==================== FUEL PRICES ====================
+        function FuelPrices() {
+            const [prices, setPrices] = useState({
+                benzin: '45.67',
+                dizel: '44.23',
+                lpg: '22.15'
+            });
+
+            return (
+                <div className="bg-gradient-to-r from-orange-400 to-red-500 rounded-xl p-4 mb-6 text-white shadow-lg">
+                    <h3 className="text-lg font-bold mb-3 flex items-center gap-2">
+                        ⛽ Güncel Akaryakıt Fiyatları
+                    </h3>
+                    <div className="grid grid-cols-3 gap-3">
+                        <div className="bg-white/20 backdrop-blur-sm rounded-lg p-3 text-center">
+                            <p className="text-xs mb-1">Benzin</p>
+                            <p className="text-xl font-bold">{prices.benzin} ₺</p>
+                        </div>
+                        <div className="bg-white/20 backdrop-blur-sm rounded-lg p-3 text-center">
+                            <p className="text-xs mb-1">Dizel</p>
+                            <p className="text-xl font-bold">{prices.dizel} ₺</p>
+                        </div>
+                        <div className="bg-white/20 backdrop-blur-sm rounded-lg p-3 text-center">
+                            <p className="text-xs mb-1">LPG</p>
+                            <p className="text-xl font-bold">{prices.lpg} ₺</p>
+                        </div>
+                    </div>
+                </div>
+            );
+        }
+
+        // ==================== ADVANCED FILTER ====================
+        function AdvancedFilter({ onFilter, onClose }) {
+            const [filters, setFilters] = useState({
+                location: '',
+                category: 'all',
+                minSalary: '',
+                maxSalary: '',
+                licenseClass: '',
+                vehicleSeats: '',
+                experienceYears: ''
+            });
+
+            const handleApply = () => {
+                onFilter(filters);
+                onClose();
+            };
+
+            return (
+                <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+                    <div className="bg-white rounded-2xl max-w-md w-full max-h-[90vh] overflow-y-auto p-6">
+                        <div className="flex justify-between items-center mb-6">
+                            <h3 className="text-xl font-bold text-gray-800">Gelişmiş Filtrele</h3>
+                            <button onClick={onClose} className="text-gray-500 hover:text-gray-700">
+                                ✕
+                            </button>
+                        </div>
+
+                        <div className="space-y-4">
+                            <div>
+                                <label className="block text-sm font-medium text-gray-700 mb-2">Konum</label>
+                                <input
+                                    type="text"
+                                    placeholder="Şehir veya İlçe"
+                                    value={filters.location}
+                                    onChange={(e) => setFilters({...filters, location: e.target.value})}
+                                    className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500"
+                                />
+                            </div>
+
+                            <div>
+                                <label className="block text-sm font-medium text-gray-700 mb-2">İlan Tipi</label>
+                                <select
+                                    value={filters.category}
+                                    onChange={(e) => setFilters({...filters, category: e.target.value})}
+                                    className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500"
+                                >
+                                    <option value="all">Tümü</option>
+                                    <option value="surucu-ariyorum">Sürücü Arıyorum</option>
+                                    <option value="is-ariyorum">İş Arıyorum</option>
+                                    <option value="arac-ariyorum">Araç Arıyorum</option>
+                                </select>
+                            </div>
+
+                            <div>
+                                <label className="block text-sm font-medium text-gray-700 mb-2">Ücret Aralığı (₺)</label>
+                                <div className="grid grid-cols-2 gap-2">
+                                    <input
+                                        type="number"
+                                        placeholder="Min"
+                                        value={filters.minSalary}
+                                        onChange={(e) => setFilters({...filters, minSalary: e.target.value})}
+                                        className="px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500"
+                                    />
+                                    <input
+                                        type="number"
+                                        placeholder="Max"
+                                        value={filters.maxSalary}
+                                        onChange={(e) => setFilters({...filters, maxSalary: e.target.value})}
+                                        className="px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500"
+                                    />
+                                </div>
+                            </div>
+
+                            <div>
+                                <label className="block text-sm font-medium text-gray-700 mb-2">Ehliyet Sınıfı</label>
+                                <select
+                                    value={filters.licenseClass}
+                                    onChange={(e) => setFilters({...filters, licenseClass: e.target.value})}
+                                    className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500"
+                                >
+                                    <option value="">Seçiniz</option>
+                                    <option value="B">B Sınıfı</option>
+                                    <option value="C">C Sınıfı</option>
+                                    <option value="D">D Sınıfı</option>
+                                    <option value="E">E Sınıfı</option>
+                                </select>
+                            </div>
+
+                            <div>
+                                <label className="block text-sm font-medium text-gray-700 mb-2">Araç Koltuk Sayısı</label>
+                                <select
+                                    value={filters.vehicleSeats}
+                                    onChange={(e) => setFilters({...filters, vehicleSeats: e.target.value})}
+                                    className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500"
+                                >
+                                    <option value="">Seçiniz</option>
+                                    <option value="5-7">5-7 Kişi</option>
+                                    <option value="8-14">8-14 Kişi</option>
+                                    <option value="15+">15+ Kişi</option>
+                                </select>
+                            </div>
+
+                            <div>
+                                <label className="block text-sm font-medium text-gray-700 mb-2">Deneyim (Yıl)</label>
+                                <input
+                                    type="number"
+                                    placeholder="Minimum yıl"
+                                    value={filters.experienceYears}
+                                    onChange={(e) => setFilters({...filters, experienceYears: e.target.value})}
+                                    className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500"
+                                />
+                            </div>
+                        </div>
+
+                        <div className="flex gap-3 mt-6">
+                            <button
+                                onClick={() => {
+                                    setFilters({
+                                        location: '',
+                                        category: 'all',
+                                        minSalary: '',
+                                        maxSalary: '',
+                                        licenseClass: '',
+                                        vehicleSeats: '',
+                                        experienceYears: ''
+                                    });
+                                }}
+                                className="flex-1 px-4 py-2 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50"
+                            >
+                                Temizle
+                            </button>
+                            <button
+                                onClick={handleApply}
+                                className="flex-1 px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700"
+                            >
+                                Uygula
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            );
+        }
+
+        // ==================== REPORT MODAL ====================
+        function ReportModal({ targetType, targetId, onClose, reporterUserId }) {
+            const [reason, setReason] = useState('');
+            const [description, setDescription] = useState('');
+            const [submitting, setSubmitting] = useState(false);
+
+            const handleSubmit = async (e) => {
+                e.preventDefault();
+                setSubmitting(true);
+
+                try {
+                    const report = {
+                        id: generateId(),
+                        reporterId: reporterUserId,
+                        targetType: targetType, // 'post' or 'user'
+                        targetId: targetId,
+                        reason: reason,
+                        description: description,
+                        status: 'pending',
+                        createdAt: new Date().toISOString()
+                    };
+
+                    await db.addReport(report);
+                    alert('Şikayetiniz admin paneline iletildi. En kısa sürede incelenecektir.');
+                    onClose();
+                } catch (err) {
+                    console.error(err);
+                    alert('Bir hata oluştu. Lütfen tekrar deneyin.');
+                } finally {
+                    setSubmitting(false);
+                }
+            };
+
+            return (
+                <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+                    <div className="bg-white rounded-2xl max-w-md w-full p-6">
+                        <div className="flex justify-between items-center mb-6">
+                            <h3 className="text-xl font-bold text-gray-800 flex items-center gap-2">
+                                <FlagIcon />
+                                Şikayet Et
+                            </h3>
+                            <button onClick={onClose} className="text-gray-500 hover:text-gray-700">
+                                ✕
+                            </button>
+                        </div>
+
+                        <form onSubmit={handleSubmit} className="space-y-4">
+                            <div>
+                                <label className="block text-sm font-medium text-gray-700 mb-2">Şikayet Sebebi</label>
+                                <select
+                                    value={reason}
+                                    onChange={(e) => setReason(e.target.value)}
+                                    required
+                                    className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500"
+                                >
+                                    <option value="">Seçiniz</option>
+                                    <option value="spam">Spam/Gereksiz İçerik</option>
+                                    <option value="fake">Sahte/Yanıltıcı Bilgi</option>
+                                    <option value="inappropriate">Uygunsuz İçerik</option>
+                                    <option value="scam">Dolandırıcılık</option>
+                                    <option value="other">Diğer</option>
+                                </select>
+                            </div>
+
+                            <div>
+                                <label className="block text-sm font-medium text-gray-700 mb-2">Açıklama</label>
+                                <textarea
+                                    value={description}
+                                    onChange={(e) => setDescription(e.target.value)}
+                                    required
+                                    rows={4}
+                                    placeholder="Lütfen şikayetinizi detaylı açıklayın..."
+                                    className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 resize-none"
+                                />
+                            </div>
+
+                            <div className="flex gap-3">
+                                <button
+                                    type="button"
+                                    onClick={onClose}
+                                    className="flex-1 px-4 py-2 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50"
+                                >
+                                    İptal
+                                </button>
+                                <button
+                                    type="submit"
+                                    disabled={submitting}
+                                    className="flex-1 px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 disabled:opacity-50"
+                                >
+                                    {submitting ? 'Gönderiliyor...' : 'Şikayet Et'}
+                                </button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+            );
+        }
+
+        // ==================== MAP COMPONENT ====================
+        function MapComponent({ location, postTitle }) {
+            useEffect(() => {
+                if (location && location.lat && location.lng && window.L) {
+                    const map = window.L.map('map-' + location.id).setView([location.lat, location.lng], 13);
+                    
+                    window.L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+                        attribution: '© OpenStreetMap contributors'
+                    }).addTo(map);
+
+                    window.L.marker([location.lat, location.lng])
+                        .addTo(map)
+                        .bindPopup(postTitle)
+                        .openPopup();
+
+                    return () => {
+                        map.remove();
+                    };
+                }
+            }, [location, postTitle]);
+
+            if (!location || !location.lat || !location.lng) {
+                return null;
+            }
+
+            return (
+                <div className="mt-4">
+                    <h4 className="text-sm font-semibold text-gray-700 mb-2 flex items-center gap-2">
+                        <MapIcon />
+                        Konum
+                    </h4>
+                    <div id={'map-' + location.id} className="map-container"></div>
+                </div>
+            );
+        }
+
+        // ==================== JOB DETAIL PAGE ====================
+        function JobDetailPage({ post, currentUser, onBack, onEditPost }) {
+            const [postOwner, setPostOwner] = useState(null);
+            const [ownerOtherPosts, setOwnerOtherPosts] = useState([]);
+            const [isFavorite, setIsFavorite] = useState(false);
+            const [showMessageModal, setShowMessageModal] = useState(false);
+            const [showReportModal, setShowReportModal] = useState(false);
+
+            useEffect(() => {
+                const loadOwnerData = async () => {
+                    try {
+                        const owner = await db.getUserById(post.userId);
+                        setPostOwner(owner);
+
+                        const allPosts = await db.getAllJobPosts();
+                        const otherPosts = allPosts.filter(p => 
+                            p.userId === post.userId && p.id !== post.id && p.status === 'active'
+                        ).slice(0, 3);
+                        setOwnerOtherPosts(otherPosts);
+
+                        // Check if favorite
+                        const favorites = await db.getUserFavorites(currentUser.id);
+                        const isFav = favorites.some(f => f.targetId === post.id && f.targetType === 'post');
+                        setIsFavorite(isFav);
+                    } catch (err) {
+                        console.error(err);
+                    }
+                };
+
+                loadOwnerData();
+            }, [post, currentUser]);
+
+            const handleFavoriteToggle = async () => {
+                try {
+                    const favorites = await db.getUserFavorites(currentUser.id);
+                    const existingFav = favorites.find(f => f.targetId === post.id && f.targetType === 'post');
+
+                    if (existingFav) {
+                        await db.removeFavorite(existingFav.id);
+                        setIsFavorite(false);
+                    } else {
+                        const newFav = {
+                            id: generateId(),
+                            userId: currentUser.id,
+                        contactInfo: "",
+                        accountType: "individual",
+                        companyName: "",
+                            targetType: 'post',
+                            targetId: post.id,
+                            createdAt: new Date().toISOString()
+                        };
+                        await db.addFavorite(newFav);
+                        setIsFavorite(true);
+                    }
+                } catch (err) {
+                    console.error(err);
+                }
+            };
+
+            const getCategoryLabel = (category) => {
+                const labels = {
+                    'surucu-ariyorum': ' Sürücü Arıyorum',
+                    'is-ariyorum': ' İş Arıyorum',
+                    'arac-ariyorum': ' Araç Arıyorum'
+                };
+                return labels[category] || category;
+            };
+
+            if (!postOwner) {
+                return (
+                    <div className="p-4">
+                        <div className="animate-spin rounded-full h-12 w-12 border-b-4 border-indigo-600 mx-auto"></div>
+                    </div>
+                );
+            }
+
+            return (
+                <div className="pb-20">
+                    {/* Header */}
+                    <div className="sticky top-0 bg-white border-b border-gray-200 p-4 flex items-center gap-3 z-10">
+                        <button onClick={onBack} className="text-gray-600 hover:text-gray-800">
+                            ← Geri
+                        </button>
+                        <h2 className="text-lg font-bold text-gray-800 flex-1">İlan Detayı</h2>
+                        {post.isSponsored && (
+                            <span className="sponsored-badge text-xs font-bold text-white px-3 py-1 rounded-full flex items-center gap-1">
+                                <StarIcon filled={true} />
+                                Sponsorlu
+                            </span>
+                        )}
+                    </div>
+
+                    {/* Post Content */}
+                    <div className="p-4 space-y-6">
+                        <div className="bg-white rounded-xl shadow-md p-6">
+                            <div className="flex justify-between items-start mb-4">
+                                <div>
+                                    <span className="inline-block bg-indigo-100 text-indigo-800 text-sm font-medium px-3 py-1 rounded-full mb-2">
+                                        {getCategoryLabel(post.category)}
+                                    </span>
+                                    <h3 className="text-xl font-bold text-gray-800">{post.title}</h3>
+                                </div>
+                                <button 
+                                    onClick={handleFavoriteToggle}
+                                    className={`p-2 rounded-full ${isFavorite ? 'text-red-500' : 'text-gray-400'} hover:bg-gray-100`}
+                                >
+                                    <HeartIcon filled={isFavorite} />
+                                </button>
+                            </div>
+
+                            <p className="text-gray-700 whitespace-pre-wrap mb-4">{post.description}</p>
+
+                            {post.salary && (
+                                <div className="bg-green-50 border border-green-200 rounded-lg p-3 mb-4">
+                                    <p className="text-sm text-green-800 font-medium">💰 Ücret: {post.salary} ₺</p>
+                                </div>
+                            )}
+
+                            {post.location && post.location.address && (
+                                <div className="mb-4">
+                                    <p className="text-sm text-gray-600">📍 {post.location.address}</p>
+                                </div>
+                            )}
+
+                            <div className="flex gap-2 mt-4">
+                                {post.userId === currentUser.id ? (
+                                    <button
+                                        onClick={() => onEditPost(post)}
+                                        className="flex-1 bg-indigo-600 text-white py-2 px-4 rounded-lg font-medium hover:bg-indigo-700"
+                                    >
+                                        ✏️ Düzenle
+                                    </button>
+                                ) : (
+                                    <button
+                                        onClick={() => setShowMessageModal(true)}
+                                        className="flex-1 bg-indigo-600 text-white py-2 px-4 rounded-lg font-medium hover:bg-indigo-700 flex items-center justify-center gap-2"
+                                    >
+                                        <MessageIcon />
+                                        Mesaj Gönder
+                                    </button>
+                                )}
+                                <button
+                                    onClick={() => setShowReportModal(true)}
+                                    className="px-4 py-2 bg-red-50 text-red-600 rounded-lg hover:bg-red-100 flex items-center gap-2"
+                                >
+                                    <FlagIcon />
+                                    Şikayet Et
+                                </button>
+                            </div>
+
+                            {post.location && post.location.lat && post.location.lng && (
+                                <MapComponent location={{...post.location, id: post.id}} postTitle={post.title} />
+                            )}
+                        </div>
+
+                        {/* Owner Profile */}
+                        <div className="bg-white rounded-xl shadow-md p-6">
+                            <h4 className="text-lg font-bold text-gray-800 mb-4">İlan Sahibi</h4>
+                            <div className="flex items-center gap-4 mb-4">
+                                {postOwner.profileImage ? (
+                                    <img src={postOwner.profileImage} alt="Profile" className="w-16 h-16 rounded-full object-cover" />
+                                ) : (
+                                    <div className="w-16 h-16 rounded-full bg-gray-200 flex items-center justify-center">
+                                        <span className="text-3xl">👤</span>
+                                    </div>
+                                )}
+                                <div className="flex-1">
+                                    <div className="flex items-center gap-2 mb-1">
+                                        <p className="font-bold text-gray-800">{postOwner.name} {postOwner.surname}</p>
+                                        {postOwner.isSponsored && (
+                                            <span className="sponsored-badge text-xs font-bold text-white px-2 py-0.5 rounded-full">
+                                                ⭐ VIP
+                                            </span>
+                                        )}
+                                    </div>
+                                    <div className="flex items-center gap-2 flex-wrap">
+                                        {postOwner.emailVerified && (
+                                            <span className="text-xs bg-green-100 text-green-800 px-2 py-0.5 rounded-full flex items-center gap-1">
+                                                <ShieldIcon />
+                                                E-posta Doğrulandı
+                                            </span>
+                                        )}
+                                        {postOwner.phoneVerified && (
+                                            <span className="text-xs bg-blue-100 text-blue-800 px-2 py-0.5 rounded-full flex items-center gap-1">
+                                                <ShieldIcon />
+                                                Telefon Doğrulandı
+                                            </span>
+                                        )}
+                                        {postOwner.idVerified && (
+                                            <span className="text-xs bg-purple-100 text-purple-800 px-2 py-0.5 rounded-full flex items-center gap-1">
+                                                <ShieldIcon />
+                                                Kimlik Doğrulandı
+                                            </span>
+                                        )}
+                                    </div>
+                                </div>
+                            </div>
+
+                            {postOwner.about && (
+                                <div className="bg-gray-50 rounded-lg p-3 mb-4">
+                                    <p className="text-sm text-gray-700">{postOwner.about}</p>
+                                </div>
+                            )}
+
+                            <div className="grid grid-cols-2 gap-2 text-sm">
+                                {postOwner.licenseClass && (
+                                    <div>
+                                        <span className="text-gray-600">Ehliyet:</span>
+                                        <span className="font-medium text-gray-800 ml-2">{postOwner.licenseClass}</span>
+                                    </div>
+                                )}
+                                {postOwner.vehicleSeats && (
+                                    <div>
+                                        <span className="text-gray-600">Araç Kapasitesi:</span>
+                                        <span className="font-medium text-gray-800 ml-2">{postOwner.vehicleSeats}</span>
+                                    </div>
+                                )}
+                                {postOwner.experienceYears && (
+                                    <div>
+                                        <span className="text-gray-600">Deneyim:</span>
+                                        <span className="font-medium text-gray-800 ml-2">{postOwner.experienceYears} yıl</span>
+                                    </div>
+                                )}
+                                {postOwner.vehicleType && (
+                                    <div>
+                                        <span className="text-gray-600">Araç Tipi:</span>
+                                        <span className="font-medium text-gray-800 ml-2">{postOwner.vehicleType}</span>
+                                    </div>
+                                )}
+                            </div>
+                        </div>
+
+                        {/* Owner's Other Posts */}
+                        {ownerOtherPosts.length > 0 && (
+                            <div className="bg-white rounded-xl shadow-md p-6">
+                                <h4 className="text-lg font-bold text-gray-800 mb-4">Diğer İlanları</h4>
+                                <div className="space-y-3">
+                                    {ownerOtherPosts.map(otherPost => (
+                                        <div key={otherPost.id} className="border border-gray-200 rounded-lg p-3 hover:shadow-md transition-shadow">
+                                            <div className="flex justify-between items-start">
+                                                <div className="flex-1">
+                                                    <span className="inline-block bg-gray-100 text-gray-700 text-xs px-2 py-1 rounded-full mb-1">
+                                                        {getCategoryLabel(otherPost.category)}
+                                                    </span>
+                                                    <h5 className="font-semibold text-gray-800 text-sm">{otherPost.title}</h5>
+                                                    <p className="text-xs text-gray-600 line-clamp-2 mt-1">{otherPost.description}</p>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    ))}
+                                </div>
+                            </div>
+                        )}
+                    </div>
+
+                    {showMessageModal && (
+                        <MessageModal
+                            receiver={postOwner}
+                            sender={currentUser}
+                            jobPost={post}
+                            onClose={() => setShowMessageModal(false)}
+                        />
+                    )}
+
+                    {showReportModal && (
+                        <ReportModal
+                            targetType="post"
+                            targetId={post.id}
+                            reporterUserId={currentUser.id}
+                            onClose={() => setShowReportModal(false)}
+                        />
+                    )}
+                </div>
+            );
+        }
+
+        // ==================== MESSAGE MODAL ====================
+        function MessageModal({ receiver, sender, jobPost, onClose }) {
+            const [message, setMessage] = useState('');
+            const [sending, setSending] = useState(false);
+
+            const handleSend = async (e) => {
+                e.preventDefault();
+                setSending(true);
+
+                try {
+                    const newMessage = {
+                        id: generateId(),
+                        senderId: sender.id,
+                        receiverId: receiver.id,
+                        jobPostId: jobPost ? jobPost.id : null,
+                        message: message,
+                        read: false,
+                        createdAt: new Date().toISOString()
+                    };
+
+                    await db.addMessage(newMessage);
+                    alert('Mesajınız gönderildi!');
+                    onClose();
+                } catch (err) {
+                    console.error(err);
+                    alert('Mesaj gönderilemedi. Lütfen tekrar deneyin.');
+                } finally {
+                    setSending(false);
+                }
+            };
+
+            return (
+                <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+                    <div className="bg-white rounded-2xl max-w-md w-full p-6">
+                        <div className="flex justify-between items-center mb-6">
+                            <h3 className="text-xl font-bold text-gray-800 flex items-center gap-2">
+                                <MessageIcon />
+                                Mesaj Gönder
+                            </h3>
+                            <button onClick={onClose} className="text-gray-500 hover:text-gray-700">
+                                ✕
+                            </button>
+                        </div>
+
+                        <div className="bg-gray-50 rounded-lg p-3 mb-4">
+                            <p className="text-sm text-gray-600">Alıcı:</p>
+                            <p className="font-medium text-gray-800">{receiver.name} {receiver.surname}</p>
+                            {jobPost && (
+                                <>
+                                    <p className="text-sm text-gray-600 mt-2">İlan:</p>
+                                    <p className="font-medium text-gray-800 text-sm">{jobPost.title}</p>
+                                </>
+                            )}
+                        </div>
+
+                        <form onSubmit={handleSend} className="space-y-4">
+                            <div>
+                                <textarea
+                                    value={message}
+                                    onChange={(e) => setMessage(e.target.value)}
+                                    required
+                                    rows={6}
+                                    placeholder="Mesajınızı yazın..."
+                                    className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 resize-none"
+                                />
+                            </div>
+
+                            <div className="flex gap-3">
+                                <button
+                                    type="button"
+                                    onClick={onClose}
+                                    className="flex-1 px-4 py-2 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50"
+                                >
+                                    İptal
+                                </button>
+                                <button
+                                    type="submit"
+                                    disabled={sending}
+                                    className="flex-1 px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:opacity-50"
+                                >
+                                    {sending ? 'Gönderiliyor...' : 'Gönder'}
+                                </button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+            );
+        }
+
+        // ==================== MESSAGES PAGE ====================
+        function MessagesPage({ currentUser }) {
+            const [messages, setMessages] = useState([]);
+            const [conversations, setConversations] = useState([]);
+            const [selectedConversation, setSelectedConversation] = useState(null);
+            const [loading, setLoading] = useState(true);
+
+            useEffect(() => {
+                loadMessages();
+            }, [currentUser]);
+
+            const loadMessages = async () => {
+                try {
+                    const userMessages = await db.getMessages(currentUser.id);
+                    setMessages(userMessages);
+
+                    // Group by conversations
+                    const convMap = new Map();
+                    
+                    for (const msg of userMessages) {
+                        const otherId = msg.senderId === currentUser.id ? msg.receiverId : msg.senderId;
+                        
+                        if (!convMap.has(otherId)) {
+                            const otherUser = await db.getUserById(otherId);
+                            convMap.set(otherId, {
+                                user: otherUser,
+                                messages: [],
+                                unreadCount: 0
+                            });
+                        }
+                        
+                        const conv = convMap.get(otherId);
+                        conv.messages.push(msg);
+                        
+                        if (!msg.read && msg.receiverId === currentUser.id) {
+                            conv.unreadCount++;
+                        }
+                    }
+
+                    const convList = Array.from(convMap.values()).map(conv => {
+                        conv.messages.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+                        return conv;
+                    });
+
+                    convList.sort((a, b) => new Date(b.messages[0].createdAt) - new Date(a.messages[0].createdAt));
+
+                    setConversations(convList);
+                } catch (err) {
+                    console.error(err);
+                } finally {
+                    setLoading(false);
+                }
+            };
+
+            if (loading) {
+                return (
+                    <div className="p-4">
+                        <div className="animate-spin rounded-full h-12 w-12 border-b-4 border-indigo-600 mx-auto"></div>
+                    </div>
+                );
+            }
+
+            if (selectedConversation) {
+                const sortedMessages = [...selectedConversation.messages].sort((a, b) => 
+                    new Date(a.createdAt) - new Date(b.createdAt)
+                );
+
+                return (
+                    <div className="flex flex-col h-screen pb-16">
+                        <div className="sticky top-0 bg-white border-b border-gray-200 p-4 flex items-center gap-3 z-10">
+                            <button 
+                                onClick={() => setSelectedConversation(null)} 
+                                className="text-gray-600 hover:text-gray-800"
+                            >
+                                ← Geri
+                            </button>
+                            <div className="flex items-center gap-2 flex-1">
+                                {selectedConversation.user.profileImage ? (
+                                    <img src={selectedConversation.user.profileImage} alt="Profile" className="w-10 h-10 rounded-full object-cover" />
+                                ) : (
+                                    <div className="w-10 h-10 rounded-full bg-gray-200 flex items-center justify-center">
+                                        <span className="text-xl">👤</span>
+                                    </div>
+                                )}
+                                <h2 className="font-bold text-gray-800">
+                                    {selectedConversation.user.name} {selectedConversation.user.surname}
+                                </h2>
+                            </div>
+                        </div>
+
+                        <div className="flex-1 overflow-y-auto p-4 space-y-3">
+                            {sortedMessages.map(msg => (
+                                <div
+                                    key={msg.id}
+                                    className={`flex ${msg.senderId === currentUser.id ? 'justify-end' : 'justify-start'}`}
+                                >
+                                    <div
+                                        className={`max-w-xs rounded-lg p-3 ${
+                                            msg.senderId === currentUser.id
+                                                ? 'bg-indigo-600 text-white'
+                                                : 'bg-gray-200 text-gray-800'
+                                        }`}
+                                    >
+                                        <p className="text-sm whitespace-pre-wrap">{msg.message}</p>
+                                        <p className="text-xs mt-1 opacity-75">
+                                            {new Date(msg.createdAt).toLocaleString('tr-TR')}
+                                        </p>
+                                    </div>
+                                </div>
+                            ))}
+                        </div>
+                    </div>
+                );
+            }
+
+            return (
+                <div className="p-4 pb-20">
+                    <h2 className="text-2xl font-bold text-gray-800 mb-4 flex items-center gap-2">
+                        <MessageIcon />
+                        Mesajlarım
+                    </h2>
+
+                    {conversations.length === 0 ? (
+                        <div className="text-center py-12">
+                            <p className="text-gray-500">Henüz mesajınız yok</p>
+                        </div>
+                    ) : (
+                        <div className="space-y-3">
+                            {conversations.map(conv => (
+                                <button
+                                    key={conv.user.id}
+                                    onClick={() => setSelectedConversation(conv)}
+                                    className="w-full bg-white rounded-xl shadow-md p-4 hover:shadow-lg transition-shadow text-left"
+                                >
+                                    <div className="flex items-center gap-3">
+                                        {conv.user.profileImage ? (
+                                            <img src={conv.user.profileImage} alt="Profile" className="w-12 h-12 rounded-full object-cover" />
+                                        ) : (
+                                            <div className="w-12 h-12 rounded-full bg-gray-200 flex items-center justify-center">
+                                                <span className="text-2xl">👤</span>
+                                            </div>
+                                        )}
+                                        <div className="flex-1 min-w-0">
+                                            <div className="flex justify-between items-center mb-1">
+                                                <p className="font-bold text-gray-800 truncate">
+                                                    {conv.user.name} {conv.user.surname}
+                                                </p>
+                                                {conv.unreadCount > 0 && (
+                                                    <span className="bg-red-500 text-white text-xs font-bold px-2 py-1 rounded-full">
+                                                        {conv.unreadCount}
+                                                    </span>
+                                                )}
+                                            </div>
+                                            <p className="text-sm text-gray-600 truncate">
+                                                {conv.messages[0].message}
+                                            </p>
+                                            <p className="text-xs text-gray-400 mt-1">
+                                                {new Date(conv.messages[0].createdAt).toLocaleDateString('tr-TR')}
+                                            </p>
+                                        </div>
+                                    </div>
+                                </button>
+                            ))}
+                        </div>
+                    )}
+                </div>
+            );
+        }
+
+        // ==================== FAVORITES PAGE ====================
+        function FavoritesPage({ currentUser }) {
+            const [favorites, setFavorites] = useState([]);
+            const [loading, setLoading] = useState(true);
+
+            useEffect(() => {
+                loadFavorites();
+            }, [currentUser]);
+
+            const loadFavorites = async () => {
+                try {
+                    const userFavorites = await db.getUserFavorites(currentUser.id);
+                    const favoritesWithData = [];
+
+                    for (const fav of userFavorites) {
+                        if (fav.targetType === 'post') {
+                            const post = await db.getJobPostById(fav.targetId);
+                            if (post && post.status === 'active') {
+                                favoritesWithData.push({ ...fav, data: post });
+                            }
+                        } else if (fav.targetType === 'user') {
+                            const user = await db.getUserById(fav.targetId);
+                            if (user) {
+                                favoritesWithData.push({ ...fav, data: user });
+                            }
+                        }
+                    }
+
+                    setFavorites(favoritesWithData);
+                } catch (err) {
+                    console.error(err);
+                } finally {
+                    setLoading(false);
+                }
+            };
+
+            const handleRemoveFavorite = async (favoriteId) => {
+                try {
+                    await db.removeFavorite(favoriteId);
+                    setFavorites(favorites.filter(f => f.id !== favoriteId));
+                } catch (err) {
+                    console.error(err);
+                }
+            };
+
+            if (loading) {
+                return (
+                    <div className="p-4">
+                        <div className="animate-spin rounded-full h-12 w-12 border-b-4 border-indigo-600 mx-auto"></div>
+                    </div>
+                );
+            }
+
+            return (
+                <div className="p-4 pb-20">
+                    <h2 className="text-2xl font-bold text-gray-800 mb-4 flex items-center gap-2">
+                        <HeartIcon filled={true} />
+                        Favorilerim
+                    </h2>
+
+                    {favorites.length === 0 ? (
+                        <div className="text-center py-12">
+                            <p className="text-gray-500">Henüz favori eklemediniz</p>
+                        </div>
+                    ) : (
+                        <div className="space-y-3">
+                            {favorites.map(fav => (
+                                <div key={fav.id} className="bg-white rounded-xl shadow-md p-4">
+                                    {fav.targetType === 'post' ? (
+                                        <>
+                                            <div className="flex justify-between items-start mb-2">
+                                                <span className="inline-block bg-indigo-100 text-indigo-800 text-xs px-2 py-1 rounded-full">
+                                                    {fav.data.category}
+                                                </span>
+                                                <button
+                                                    onClick={() => handleRemoveFavorite(fav.id)}
+                                                    className="text-red-500 hover:text-red-700"
+                                                >
+                                                    <HeartIcon filled={true} />
+                                                </button>
+                                            </div>
+                                            <h3 className="font-bold text-gray-800 mb-2">{fav.data.title}</h3>
+                                            <p className="text-sm text-gray-600 line-clamp-2">{fav.data.description}</p>
+                                        </>
+                                    ) : (
+                                        <>
+                                            <div className="flex items-center justify-between">
+                                                <div className="flex items-center gap-3">
+                                                    {fav.data.profileImage ? (
+                                                        <img src={fav.data.profileImage} alt="Profile" className="w-12 h-12 rounded-full object-cover" />
+                                                    ) : (
+                                                        <div className="w-12 h-12 rounded-full bg-gray-200 flex items-center justify-center">
+                                                            <span className="text-2xl">👤</span>
+                                                        </div>
+                                                    )}
+                                                    <div>
+                                                        <p className="font-bold text-gray-800">
+                                                            {fav.data.name} {fav.data.surname}
+                                                        </p>
+                                                        <p className="text-sm text-gray-600">{fav.data.phoneOrEmail}</p>
+                                                    </div>
+                                                </div>
+                                                <button
+                                                    onClick={() => handleRemoveFavorite(fav.id)}
+                                                    className="text-red-500 hover:text-red-700"
+                                                >
+                                                    <HeartIcon filled={true} />
+                                                </button>
+                                            </div>
+                                        </>
+                                    )}
+                                </div>
+                            ))}
+                        </div>
+                    )}
+                </div>
+            );
+        }
+
+        // ==================== ADMIN PANEL ====================
+        function AdminPanel({ currentUser }) {
+            const [reports, setReports] = useState([]);
+            const [allUsers, setAllUsers] = useState([]);
+            const [allPosts, setAllPosts] = useState([]);
+            const [activeTab, setActiveTab] = useState('reports');
+            const [loading, setLoading] = useState(true);
+
+            useEffect(() => {
+                loadAdminData();
+            }, []);
+
+            const loadAdminData = async () => {
+                try {
+                    const reportsData = await db.getAllReports();
+                    setReports(reportsData.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt)));
+
+                    const postsData = await db.getAllJobPosts();
+                    setAllPosts(postsData);
+
+                    // Load all users
+                    const usersData = [];
+                    const transaction = db.db.transaction(['users'], 'readonly');
+                    const store = transaction.objectStore('users');
+                    const request = store.getAll();
+                    request.onsuccess = () => {
+                        setAllUsers(request.result.filter(u => u.phoneOrEmail !== 'admin@admin.com'));
+                    };
+                } catch (err) {
+                    console.error(err);
+                } finally {
+                    setLoading(false);
+                }
+            };
+
+            const handleReportStatus = async (reportId, newStatus) => {
+                try {
+                    const report = reports.find(r => r.id === reportId);
+                    if (report) {
+                        report.status = newStatus;
+                        await db.updateReport(report);
+                        setReports([...reports]);
+                    }
+                } catch (err) {
+                    console.error(err);
+                }
+            };
+
+            const handleToggleSponsorship = async (userId, type) => {
+                try {
+                    const user = allUsers.find(u => u.id === userId);
+                    if (user) {
+                        user.isSponsored = !user.isSponsored;
+                        await db.updateUser(user);
+                        setAllUsers([...allUsers]);
+                    }
+                } catch (err) {
+                    console.error(err);
+                }
+            };
+
+            const handleTogglePostSponsorship = async (postId) => {
+                try {
+                    const post = allPosts.find(p => p.id === postId);
+                    if (post) {
+                        post.isSponsored = !post.isSponsored;
+                        await db.updateJobPost(post);
+                        setAllPosts([...allPosts]);
+                    }
+                } catch (err) {
+                    console.error(err);
+                }
+            };
+
+            if (loading) {
+                return (
+                    <div className="p-4">
+                        <div className="animate-spin rounded-full h-12 w-12 border-b-4 border-indigo-600 mx-auto"></div>
+                    </div>
+                );
+            }
+
+            return (
+                <div className="p-4 pb-20">
+                    <h2 className="text-2xl font-bold text-gray-800 mb-4 flex items-center gap-2">
+                        🛡️ Admin Paneli
+                    </h2>
+
+                    <div className="flex gap-2 mb-6 overflow-x-auto">
+                        <button
+                            onClick={() => setActiveTab('reports')}
+                            className={`px-4 py-2 rounded-lg font-medium whitespace-nowrap ${
+                                activeTab === 'reports' ? 'bg-indigo-600 text-white' : 'bg-gray-200 text-gray-700'
+                            }`}
+                        >
+                            Şikayetler ({reports.filter(r => r.status === 'pending').length})
+                        </button>
+                        <button
+                            onClick={() => setActiveTab('users')}
+                            className={`px-4 py-2 rounded-lg font-medium whitespace-nowrap ${
+                                activeTab === 'users' ? 'bg-indigo-600 text-white' : 'bg-gray-200 text-gray-700'
+                            }`}
+                        >
+                            Kullanıcılar
+                        </button>
+                        <button
+                            onClick={() => setActiveTab('posts')}
+                            className={`px-4 py-2 rounded-lg font-medium whitespace-nowrap ${
+                                activeTab === 'posts' ? 'bg-indigo-600 text-white' : 'bg-gray-200 text-gray-700'
+                            }`}
+                        >
+                            İlanlar
+                        </button>
+                    </div>
+
+                    {activeTab === 'reports' && (
+                        <div className="space-y-3">
+                            {reports.length === 0 ? (
+                                <p className="text-center text-gray-500 py-12">Henüz şikayet yok</p>
+                            ) : (
+                                reports.map(report => (
+                                    <div key={report.id} className="bg-white rounded-xl shadow-md p-4">
+                                        <div className="flex justify-between items-start mb-3">
+                                            <div>
+                                                <span className={`inline-block text-xs font-bold px-2 py-1 rounded-full ${
+                                                    report.status === 'pending' ? 'bg-yellow-100 text-yellow-800' :
+                                                    report.status === 'resolved' ? 'bg-green-100 text-green-800' :
+                                                    'bg-red-100 text-red-800'
+                                                }`}>
+                                                    {report.status === 'pending' ? 'Beklemede' :
+                                                     report.status === 'resolved' ? 'Çözüldü' : 'Reddedildi'}
+                                                </span>
+                                                <p className="text-xs text-gray-500 mt-1">
+                                                    {new Date(report.createdAt).toLocaleString('tr-TR')}
+                                                </p>
+                                            </div>
+                                            <span className="text-xs bg-gray-100 px-2 py-1 rounded">
+                                                {report.targetType === 'post' ? 'İlan' : 'Kullanıcı'}
+                                            </span>
+                                        </div>
+                                        <p className="text-sm font-medium text-gray-800 mb-1">
+                                            Sebep: {report.reason}
+                                        </p>
+                                        <p className="text-sm text-gray-600 mb-3">{report.description}</p>
+                                        {report.status === 'pending' && (
+                                            <div className="flex gap-2">
+                                                <button
+                                                    onClick={() => handleReportStatus(report.id, 'resolved')}
+                                                    className="flex-1 bg-green-600 text-white py-2 px-4 rounded-lg text-sm hover:bg-green-700"
+                                                >
+                                                    ✓ Çözüldü
+                                                </button>
+                                                <button
+                                                    onClick={() => handleReportStatus(report.id, 'rejected')}
+                                                    className="flex-1 bg-red-600 text-white py-2 px-4 rounded-lg text-sm hover:bg-red-700"
+                                                >
+                                                    ✕ Reddet
+                                                </button>
+                                            </div>
+                                        )}
+                                    </div>
+                                ))
+                            )}
+                        </div>
+                    )}
+
+                    {activeTab === 'users' && (
+                        <div className="space-y-3">
+                            {allUsers.map(user => (
+                                <div key={user.id} className="bg-white rounded-xl shadow-md p-4">
+                                    <div className="flex items-center justify-between mb-3">
+                                        <div className="flex items-center gap-3">
+                                            {user.profileImage ? (
+                                                <img src={user.profileImage} alt="Profile" className="w-12 h-12 rounded-full object-cover" />
+                                            ) : (
+                                                <div className="w-12 h-12 rounded-full bg-gray-200 flex items-center justify-center">
+                                                    <span className="text-2xl">👤</span>
+                                                </div>
+                                            )}
+                                            <div>
+                                                <p className="font-bold text-gray-800">
+                                                    {user.name} {user.surname}
+                                                    {user.isSponsored && (
+                                                        <span className="ml-2 sponsored-badge text-xs font-bold text-white px-2 py-0.5 rounded-full">
+                                                            ⭐ VIP
+                                                        </span>
+                                                    )}
+                                                </p>
+                                                <p className="text-sm text-gray-600">{user.phoneOrEmail}</p>
+                                            </div>
+                                        </div>
+                                    </div>
+                                    <button
+                                        onClick={() => handleToggleSponsorship(user.id)}
+                                        className={`w-full py-2 px-4 rounded-lg text-sm font-medium ${
+                                            user.isSponsored
+                                                ? 'bg-yellow-600 text-white hover:bg-yellow-700'
+                                                : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
+                                        }`}
+                                    >
+                                        {user.isSponsored ? '⭐ VIP İptal Et' : '⭐ VIP Yap'}
+                                    </button>
+                                </div>
+                            ))}
+                        </div>
+                    )}
+
+                    {activeTab === 'posts' && (
+                        <div className="space-y-3">
+                            {allPosts.map(post => (
+                                <div key={post.id} className="bg-white rounded-xl shadow-md p-4">
+                                    <div className="flex justify-between items-start mb-3">
+                                        <div>
+                                            <span className="inline-block bg-indigo-100 text-indigo-800 text-xs px-2 py-1 rounded-full mb-2">
+                                                {post.category}
+                                            </span>
+                                            {post.isSponsored && (
+                                                <span className="ml-2 sponsored-badge text-xs font-bold text-white px-2 py-0.5 rounded-full">
+                                                    <StarIcon filled={true} />
+                                                    Sponsorlu
+                                                </span>
+                                            )}
+                                            <h4 className="font-bold text-gray-800">{post.title}</h4>
+                                        </div>
+                                    </div>
+                                    <p className="text-sm text-gray-600 line-clamp-2 mb-3">{post.description}</p>
+                                    <button
+                                        onClick={() => handleTogglePostSponsorship(post.id)}
+                                        className={`w-full py-2 px-4 rounded-lg text-sm font-medium ${
+                                            post.isSponsored
+                                                ? 'bg-yellow-600 text-white hover:bg-yellow-700'
+                                                : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
+                                        }`}
+                                    >
+                                        {post.isSponsored ? '⭐ Sponsorluğu Kaldır' : '⭐ Sponsorlu Yap'}
+                                    </button>
+                                </div>
+                            ))}
+                        </div>
+                    )}
+                </div>
+            );
+        }
+
+        // ==================== JOB POSTS LIST ====================
+        function JobPostsList({ currentUser, onEditPost }) {
+            const [posts, setPosts] = useState([]);
+            const [filteredPosts, setFilteredPosts] = useState([]);
+            const [loading, setLoading] = useState(true);
+            const [showFilter, setShowFilter] = useState(false);
+            const [selectedPost, setSelectedPost] = useState(null);
+
+            useEffect(() => {
+                loadPosts();
+            }, []);
+
+            const loadPosts = async () => {
+                try {
+                    const allPosts = await db.getAllJobPosts();
+                    const activePosts = allPosts.filter(p => p.status === 'active');
+                    
+                    // Sort: Sponsored first, then by date
+                    activePosts.sort((a, b) => {
+                        if (a.isSponsored && !b.isSponsored) return -1;
+                        if (!a.isSponsored && b.isSponsored) return 1;
+                        return new Date(b.createdAt) - new Date(a.createdAt);
+                    });
+                    
+                    setPosts(activePosts);
+                    setFilteredPosts(activePosts);
+                } catch (err) {
+                    console.error(err);
+                } finally {
+                    setLoading(false);
+                }
+            };
+
+            const applyFilters = (filters) => {
+                let filtered = [...posts];
+
+                if (filters.location) {
+                    filtered = filtered.filter(p => 
+                        p.location && p.location.address && 
+                        p.location.address.toLowerCase().includes(filters.location.toLowerCase())
+                    );
+                }
+
+                if (filters.category !== 'all') {
+                    filtered = filtered.filter(p => p.category === filters.category);
+                }
+
+                if (filters.minSalary || filters.maxSalary) {
+                    filtered = filtered.filter(p => {
+                        if (!p.salary) return false;
+                        const salary = parseFloat(p.salary);
+                        if (filters.minSalary && salary < parseFloat(filters.minSalary)) return false;
+                        if (filters.maxSalary && salary > parseFloat(filters.maxSalary)) return false;
+                        return true;
+                    });
+                }
+
+                setFilteredPosts(filtered);
+            };
+
+            const getCategoryLabel = (category) => {
+                const labels = {
+                    'surucu-ariyorum': ' Sürücü Arıyorum',
+                    'is-ariyorum': ' İş Arıyorum',
+                    'arac-ariyorum': ' Araç Arıyorum'
+                };
+                return labels[category] || category;
+            };
+
+            if (selectedPost) {
+                return (
+                    <JobDetailPage
+                        post={selectedPost}
+                        currentUser={currentUser}
+                        onBack={() => setSelectedPost(null)}
+                        onEditPost={onEditPost}
+                    />
+                );
+            }
+
+            if (loading) {
+                return (
+                    <div className="p-4">
+                        <div className="animate-spin rounded-full h-12 w-12 border-b-4 border-indigo-600 mx-auto"></div>
+                    </div>
+                );
+            }
+
+            return (
+                <div>
+                    <div className="flex justify-between items-center mb-4">
+                        <p className="text-sm text-gray-600">
+                            {filteredPosts.length} ilan bulundu
+                        </p>
+                        <button
+                            onClick={() => setShowFilter(true)}
+                            className="flex items-center gap-2 bg-indigo-600 text-white px-4 py-2 rounded-lg hover:bg-indigo-700"
+                        >
+                            <FilterIcon />
+                            Filtrele
+                        </button>
+                    </div>
+
+                    {filteredPosts.length === 0 ? (
+                        <div className="text-center py-12">
+                            <p className="text-gray-500">Henüz ilan bulunmuyor</p>
+                        </div>
+                    ) : (
+                        <div className="space-y-4">
+                            {filteredPosts.map(post => (
+                                <div 
+                                    key={post.id} 
+                                    onClick={() => setSelectedPost(post)}
+                                    className="bg-white rounded-xl shadow-md p-4 hover:shadow-lg transition-shadow cursor-pointer"
+                                >
+                                    <div className="flex justify-between items-start mb-2">
+                                        <span className="inline-block bg-indigo-100 text-indigo-800 text-sm font-medium px-3 py-1 rounded-full">
+                                            {getCategoryLabel(post.category)}
+                                        </span>
+                                        {post.isSponsored && (
+                                            <span className="sponsored-badge text-xs font-bold text-white px-2 py-1 rounded-full flex items-center gap-1">
+                                                <StarIcon filled={true} />
+                                                Sponsorlu
+                                            </span>
+                                        )}
+                                    </div>
+                                    <h3 className="text-lg font-bold text-gray-800 mb-2">{post.title}</h3>
+                                    <p className="text-gray-700 line-clamp-3 text-sm mb-3">{post.description}</p>
+                                    {post.salary && (
+                                        <div className="bg-green-50 border border-green-200 rounded-lg p-2 mb-2">
+                                            <p className="text-sm text-green-800 font-medium">💰 {post.salary} ₺</p>
+                                        </div>
+                                    )}
+                                    {post.location && post.location.address && (
+                                        <p className="text-sm text-gray-600 mb-2">📍 {post.location.address}</p>
+                                    )}
+                                    <div className="flex justify-between items-center text-xs text-gray-500">
+                                        <span>{new Date(post.createdAt).toLocaleDateString('tr-TR')}</span>
+                                        <span>👁️ {post.views || 0} görüntülenme</span>
+                                    </div>
+                                </div>
+                            ))}
+                        </div>
+                    )}
+
+                    {showFilter && (
+                        <AdvancedFilter
+                            onFilter={applyFilters}
+                            onClose={() => setShowFilter(false)}
+                        />
+                    )}
+                </div>
+            );
+        }
+
+        // ==================== JOB POST FORM ====================
+        function JobPostForm({ currentUser, onPostCreated, editingPost, onCancelEdit }) {
+            const [formData, setFormData] = useState({
+                category: editingPost?.category || 'surucu-ariyorum',
+                title: editingPost?.title || '',
+                description: editingPost?.description || '',
+                salary: editingPost?.salary || '',
+                location: editingPost?.location || { address: '', lat: null, lng: null }
+            });
+            const [submitting, setSubmitting] = useState(false);
+
+            const handleSubmit = async (e) => {
+                e.preventDefault();
+                setSubmitting(true);
+
+                try {
+                    if (editingPost) {
+                        // Update
+                        const updatedPost = {
+                            ...editingPost,
+                            ...formData,
+                            updatedAt: new Date().toISOString()
+                        };
+                        await db.updateJobPost(updatedPost);
+                        alert('İlan güncellendi!');
+                        onCancelEdit();
+                    } else {
+                        // Create
+                        const newPost = {
+                            id: generateId(),
+                            userId: currentUser.id,
+                        contactInfo: "",
+                        accountType: "individual",
+                        companyName: "",
+                            ...formData,
+                            status: 'active',
+                            isSponsored: false,
+                            views: 0,
+                            createdAt: new Date().toISOString()
+                        };
+                        await db.addJobPost(newPost);
+                        alert('İlan başarıyla oluşturuldu!');
+                        setFormData({
+                            category: 'surucu-ariyorum',
+                            title: '',
+                            description: '',
+                            salary: '',
+                            location: { address: '', lat: null, lng: null }
+                        });
+                        onPostCreated();
+                    }
+                } catch (err) {
+                    console.error(err);
+                    alert('Bir hata oluştu. Lütfen tekrar deneyin.');
+                } finally {
+                    setSubmitting(false);
+                }
+            };
+
+            return (
+                <div>
+                    <div className="mb-6">
+                        <h2 className="text-2xl font-bold text-gray-800 flex items-center gap-2">
+                            <PlusIcon />
+                            {editingPost ? 'İlanı Düzenle' : 'Yeni İlan Ver'}
+                        </h2>
+                        {editingPost && (
+                            <button
+                                onClick={onCancelEdit}
+                                className="mt-2 text-indigo-600 text-sm hover:text-indigo-700"
+                            >
+                                ← İptalet
+                            </button>
+                        )}
+                    </div>
+
+                    <form onSubmit={handleSubmit} className="space-y-4 bg-white rounded-xl shadow-md p-6">
+                        <div>
+                            <label className="block text-sm font-medium text-gray-700 mb-2">İlan Kategorisi</label>
+                            <select
+                                value={formData.category}
+                                onChange={(e) => setFormData({...formData, category: e.target.value})}
+                                required
+                                className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500"
+                            >
+                                <option value="surucu-ariyorum"> Sürücü Arıyorum</option>
+                                <option value="is-ariyorum"> İş Arıyorum</option>
+                                <option value="arac-ariyorum"> Araç Arıyorum</option>
+                            </select>
+                        </div>
+
+                        <div>
+                            <label className="block text-sm font-medium text-gray-700 mb-2">Başlık</label>
+                            <input
+                                type="text"
+                                value={formData.title}
+                                onChange={(e) => setFormData({...formData, title: e.target.value})}
+                                required
+                                maxLength={100}
+                                placeholder="Örn: Deneyimli B sınıfı sürücü arıyorum"
+                                className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500"
+                            />
+                        </div>
+
+                        <div>
+                            <label className="block text-sm font-medium text-gray-700 mb-2">Açıklama</label>
+                            <textarea
+                                value={formData.description}
+                                onChange={(e) => setFormData({...formData, description: e.target.value})}
+                                required
+                                rows={6}
+                                maxLength={1000}
+                                placeholder="İlan detaylarını buraya yazın..."
+                                className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 resize-none"
+                            />
+                            <p className="text-xs text-gray-500 mt-1">{formData.description.length}/1000</p>
+                        </div>
+
+                        <div>
+                            <label className="block text-sm font-medium text-gray-700 mb-2">Ücret (Opsiyonel)</label>
+                            <input
+                                type="number"
+                                value={formData.salary}
+                                onChange={(e) => setFormData({...formData, salary: e.target.value})}
+                                placeholder="Aylık veya günlük ücret (₺)"
+                                className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500"
+                            />
+                        </div>
+
+                        <div>
+                            <label className="block text-sm font-medium text-gray-700 mb-2">Konum (Opsiyonel)</label>
+                            <input
+                                type="text"
+                                value={formData.location.address}
+                                onChange={(e) => setFormData({
+                                    ...formData, 
+                                    location: {...formData.location, address: e.target.value}
+                                })}
+                                placeholder="Şehir, İlçe veya adres"
+                                className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500"
+                            />
+                            <p className="text-xs text-gray-500 mt-1">
+                                Not: Tam konum için harita özelliği yakında eklenecek
+                            </p>
+                        </div>
+
+                        <button
+                            type="submit"
+                            disabled={submitting}
+                            className="w-full bg-indigo-600 text-white py-3 rounded-lg font-medium hover:bg-indigo-700 disabled:opacity-50"
+                        >
+                            {submitting ? 'Kaydediliyor...' : (editingPost ? '✓ Güncelle' : '📤 İlanı Yayınla')}
+                        </button>
+                    </form>
+                </div>
+            );
+        }
+
+        // ==================== MY POSTS ====================
+        function MyPosts({ currentUser, onEditPost }) {
+            const [myPosts, setMyPosts] = useState([]);
+            const [loading, setLoading] = useState(true);
+
+            useEffect(() => {
+                loadMyPosts();
+            }, [currentUser]);
+
+            const loadMyPosts = async () => {
+                try {
+                    const allPosts = await db.getAllJobPosts();
+                    const userPosts = allPosts.filter(p => p.userId === currentUser.id);
+                    userPosts.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+                    setMyPosts(userPosts);
+                } catch (err) {
+                    console.error(err);
+                } finally {
+                    setLoading(false);
+                }
+            };
+
+            const handleDelete = async (postId) => {
+                if (confirm('Bu ilanı silmek istediğinize emin misiniz?')) {
+                    try {
+                        await db.deleteJobPost(postId);
+                        setMyPosts(myPosts.filter(p => p.id !== postId));
+                        alert('İlan silindi!');
+                    } catch (err) {
+                        console.error(err);
+                        alert('İlan silinemedi. Lütfen tekrar deneyin.');
+                    }
+                }
+            };
+
+            const handleToggleStatus = async (post) => {
+                try {
+                    const updatedPost = {
+                        ...post,
+                        status: post.status === 'active' ? 'inactive' : 'active',
+                        updatedAt: new Date().toISOString()
+                    };
+                    await db.updateJobPost(updatedPost);
+                    setMyPosts(myPosts.map(p => p.id === post.id ? updatedPost : p));
+                } catch (err) {
+                    console.error(err);
+                }
+            };
+
+            if (loading) {
+                return (
+                    <div className="p-4">
+                        <div className="animate-spin rounded-full h-12 w-12 border-b-4 border-indigo-600 mx-auto"></div>
+                    </div>
+                );
+            }
+
+            return (
+                <div>
+                    <h2 className="text-2xl font-bold text-gray-800 mb-4 flex items-center gap-2">
+                        <UserIcon />
+                        İlanlarım ({myPosts.length})
+                    </h2>
+
+                    {myPosts.length === 0 ? (
+                        <div className="text-center py-12 bg-white rounded-xl shadow-md">
+                            <p className="text-gray-500 mb-4">Henüz ilan vermediniz</p>
+                            <p className="text-sm text-gray-400">İlan Ver sekmesinden yeni ilan oluşturabilirsiniz</p>
+                        </div>
+                    ) : (
+                        <div className="space-y-4">
+                            {myPosts.map(post => (
+                                <div key={post.id} className="bg-white rounded-xl shadow-md p-4">
+                                    <div className="flex justify-between items-start mb-2">
+                                        <span className="inline-block bg-indigo-100 text-indigo-800 text-sm font-medium px-3 py-1 rounded-full">
+                                            {post.category}
+                                        </span>
+                                        <span className={`text-xs font-medium px-2 py-1 rounded-full ${
+                                            post.status === 'active' 
+                                                ? 'bg-green-100 text-green-800' 
+                                                : 'bg-gray-100 text-gray-800'
+                                        }`}>
+                                            {post.status === 'active' ? '✓ Aktif' : '○ Pasif'}
+                                        </span>
+                                    </div>
+                                    <h3 className="text-lg font-bold text-gray-800 mb-2">{post.title}</h3>
+                                    <p className="text-gray-700 line-clamp-3 text-sm mb-3">{post.description}</p>
+                                    <div className="flex gap-2">
+                                        <button
+                                            onClick={() => onEditPost(post)}
+                                            className="flex-1 bg-indigo-600 text-white py-2 px-4 rounded-lg text-sm hover:bg-indigo-700"
+                                        >
+                                            ✏️ Düzenle
+                                        </button>
+                                        <button
+                                            onClick={() => handleToggleStatus(post)}
+                                            className="flex-1 bg-gray-200 text-gray-700 py-2 px-4 rounded-lg text-sm hover:bg-gray-300"
+                                        >
+                                            {post.status === 'active' ? '🔒 Pasif Yap' : '✓ Aktif Yap'}
+                                        </button>
+                                        <button
+                                            onClick={() => handleDelete(post.id)}
+                                            className="px-4 py-2 bg-red-600 text-white rounded-lg text-sm hover:bg-red-700"
+                                        >
+                                            🗑️
+                                        </button>
+                                    </div>
+                                </div>
+                            ))}
+                        </div>
+                    )}
+                </div>
+            );
+        }
+
+        // ==================== PROFILE EDIT ====================
+        function ProfileEdit({ currentUser, onProfileUpdate, onClose }) {
+            const [formData, setFormData] = useState({
+                name: currentUser.name,
+                surname: currentUser.surname,
+                phoneOrEmail: currentUser.phoneOrEmail,
+                about: currentUser.about || '',
+                licenseClass: currentUser.licenseClass || '',
+                vehicleSeats: currentUser.vehicleSeats || '',
+                vehicleType: currentUser.vehicleType || '',
+                experienceYears: currentUser.experienceYears || '',
+                profileImage: currentUser.profileImage
+            });
+            const [submitting, setSubmitting] = useState(false);
+
+            const handleImageChange = (e) => {
+                const file = e.target.files[0];
+                if (file) {
+                    const reader = new FileReader();
+                    reader.onloadend = () => {
+                        setFormData({...formData, profileImage: reader.result});
+                    };
+                    reader.readAsDataURL(file);
+                }
+            };
+
+            const handleSubmit = async (e) => {
+                e.preventDefault();
+                setSubmitting(true);
+
+                try {
+                    // Email validation if changed
+                    if (formData.phoneOrEmail !== currentUser.phoneOrEmail) {
+                        if (formData.phoneOrEmail.includes('@')) {
+                            if (!validateEmail(formData.phoneOrEmail) && !isAdminEmail(formData.phoneOrEmail)) {
+                                alert('Sadece @gmail.com, @hotmail.com veya @outlook.com e-posta adresleri kullanılabilir.');
+                                setSubmitting(false);
+                                return;
+                            }
+                        }
+
+                        // Check if new email/phone already exists
+                        const existingUser = await db.getUserByPhoneOrEmail(formData.phoneOrEmail);
+                        if (existingUser && existingUser.id !== currentUser.id) {
+                            alert('Bu telefon/e-posta başka bir kullanıcı tarafından kullanılıyor!');
+                            setSubmitting(false);
+                            return;
+                        }
+                    }
+
+                    const updatedUser = {
+                        ...currentUser,
+                        ...formData
+                    };
+
+                    await db.updateUser(updatedUser);
+                    onProfileUpdate(updatedUser);
+                    alert('Profil güncellendi!');
+                } catch (err) {
+                    console.error(err);
+                    alert('Profil güncellenemedi. Lütfen tekrar deneyin.');
+                } finally {
+                    setSubmitting(false);
+                }
+            };
+
+            return (
+                <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4 overflow-y-auto">
+                    <div className="bg-white rounded-2xl max-w-2xl w-full my-8 p-6">
+                        <div className="flex justify-between items-center mb-6">
+                            <h3 className="text-2xl font-bold text-gray-800">Profili Düzenle</h3>
+                            <button onClick={onClose} className="text-gray-500 hover:text-gray-700 text-2xl">
+                                ✕
+                            </button>
+                        </div>
+
+                        <form onSubmit={handleSubmit} className="space-y-4">
+                            {/* Profile Image */}
+                            <div className="text-center">
+                                <div className="inline-block relative">
+                                    {formData.profileImage ? (
+                                        <img src={formData.profileImage} alt="Profile" className="w-24 h-24 rounded-full object-cover" />
+                                    ) : (
+                                        <div className="w-24 h-24 rounded-full bg-gray-200 flex items-center justify-center">
+                                            <span className="text-4xl">👤</span>
+                                        </div>
+                                    )}
+                                    <label className="absolute bottom-0 right-0 bg-indigo-600 text-white rounded-full p-2 cursor-pointer hover:bg-indigo-700">
+                                        <input
+                                            type="file"
+                                            accept="image/*"
+                                            onChange={handleImageChange}
+                                            className="hidden"
+                                        />
+                                        📷
+                                    </label>
+                                </div>
+                            </div>
+
+                            {/* Basic Info */}
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                <div>
+                                    <label className="block text-sm font-medium text-gray-700 mb-2">Ad</label>
+                                    <input
+                                        type="text"
+                                        value={formData.name}
+                                        onChange={(e) => setFormData({...formData, name: e.target.value})}
+                                        required
+                                        className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500"
+                                    />
+                                </div>
+                                <div>
+                                    <label className="block text-sm font-medium text-gray-700 mb-2">Soyad</label>
+                                    <input
+                                        type="text"
+                                        value={formData.surname}
+                                        onChange={(e) => setFormData({...formData, surname: e.target.value})}
+                                        required
+                                        className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500"
+                                    />
+                                </div>
+                            </div>
+
+                            <div>
+                                <label className="block text-sm font-medium text-gray-700 mb-2">Telefon / E-posta</label>
+                                <input
+                                    type="text"
+                                    value={formData.phoneOrEmail}
+                                    onChange={(e) => setFormData({...formData, phoneOrEmail: e.target.value})}
+                                    required
+                                    className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500"
+                                />
+                            </div>
+
+                            {/* About */}
+                            <div>
+                                <label className="block text-sm font-medium text-gray-700 mb-2">Hakkında</label>
+                                <textarea
+                                    value={formData.about}
+                                    onChange={(e) => setFormData({...formData, about: e.target.value})}
+                                    rows={4}
+                                    maxLength={500}
+                                    placeholder="Kendinizi tanıtın..."
+                                    className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 resize-none"
+                                />
+                                <p className="text-xs text-gray-500 mt-1">{formData.about.length}/500</p>
+                            </div>
+
+                            {/* Professional Info */}
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                <div>
+                                    <label className="block text-sm font-medium text-gray-700 mb-2">Ehliyet Sınıfı</label>
+                                    <select
+                                        value={formData.licenseClass}
+                                        onChange={(e) => setFormData({...formData, licenseClass: e.target.value})}
+                                        className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500"
+                                    >
+                                        <option value="">Seçiniz</option>
+                                        <option value="B">B Sınıfı</option>
+                                        <option value="C">C Sınıfı</option>
+                                        <option value="D">D Sınıfı</option>
+                                        <option value="E">E Sınıfı</option>
+                                    </select>
+                                </div>
+                                <div>
+                                    <label className="block text-sm font-medium text-gray-700 mb-2">Deneyim (Yıl)</label>
+                                    <input
+                                        type="number"
+                                        value={formData.experienceYears}
+                                        onChange={(e) => setFormData({...formData, experienceYears: e.target.value})}
+                                        min="0"
+                                        className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500"
+                                    />
+                                </div>
+                            </div>
+
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                <div>
+                                    <label className="block text-sm font-medium text-gray-700 mb-2">Araç Koltuk Sayısı</label>
+                                    <select
+                                        value={formData.vehicleSeats}
+                                        onChange={(e) => setFormData({...formData, vehicleSeats: e.target.value})}
+                                        className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500"
+                                    >
+                                        <option value="">Seçiniz</option>
+                                        <option value="5-7">5-7 Kişi</option>
+                                        <option value="8-14">8-14 Kişi</option>
+                                        <option value="15+">15+ Kişi</option>
+                                    </select>
+                                </div>
+                                <div>
+                                    <label className="block text-sm font-medium text-gray-700 mb-2">Araç Tipi</label>
+                                    <select
+                                        value={formData.vehicleType}
+                                        onChange={(e) => setFormData({...formData, vehicleType: e.target.value})}
+                                        className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500"
+                                    >
+                                        <option value="">Seçiniz</option>
+                                        <option value="Minibüs">Minibüs</option>
+                                        <option value="Midibüs">Midibüs</option>
+                                        <option value="Otobüs">Otobüs</option>
+                                        <option value="Hafif Ticari">Hafif Ticari</option>
+                                    </select>
+                                </div>
+                            </div>
+
+                            <div className="flex gap-3 pt-4">
+                                <button
+                                    type="button"
+                                    onClick={onClose}
+                                    className="flex-1 px-4 py-3 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50"
+                                >
+                                    İptal
+                                </button>
+                                <button
+                                    type="submit"
+                                    disabled={submitting}
+                                    className="flex-1 px-4 py-3 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:opacity-50"
+                                >
+                                    {submitting ? 'Kaydediliyor...' : '✓ Kaydet'}
+                                </button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+            );
+        }
+
+        // ==================== ABOUT PAGE ====================
+        function AboutPage() {
+            return (
+                <div>
+                    <h2 className="text-2xl font-bold text-gray-800 mb-4 flex items-center gap-2">
+                        <InfoIcon />
+                        Hakkında
+                    </h2>
+
+                    <div className="bg-white rounded-xl shadow-md p-6 space-y-6">
+                        <div className="text-center">
+                            <div className="inline-flex items-center justify-center w-20 h-20 bg-indigo-600 rounded-full mb-4">
+                                <span className="text-4xl"></span>
+                            </div>
+                            <h3 className="text-2xl font-bold text-gray-800 mb-2">Servisteyim</h3>
+                            <p className="text-gray-600">Araç sahipleri ve sürücüleri buluşturan gelişmiş platform</p>
+                        </div>
+
+                        <div className="prose prose-sm max-w-none text-gray-700">
+                            <p className="leading-relaxed">
+                                Servisteyim, araç sahipleri, sürücüler ve servis sorumluları için tasarlanmış, iş odaklı bir dijital pazaryeri platformudur. Uygulama; kullanıcıların güvenilir, hızlı ve kolay bir şekilde iş bulmasını, ilan paylaşmasını ve sektörel ihtiyaçlarına yönelik çözümlere erişmesini sağlar.
+                            </p>
+                            <p className="leading-relaxed">
+                                Alanında uzman ekibiyle, şehir içi ve şehirler arası taşımacılık sektöründeki iş akışını dijitalleştirmeyi hedefleyen Servisteyim, kullanıcı dostu arayüzü ve mobil öncelikli yapısıyla hem bireysel hem de kurumsal kullanıcılara profesyonel bir deneyim sunar.
+                            </p>
+                            <p className="leading-relaxed">
+                                Araç sahipleri, sürücü arayabilir. Sürücüler, iş ilanlarına başvurabilir. Servis yöneticileri, personel veya araç ihtiyacını platform üzerinden yönetebilir.
+                            </p>
+                            <p className="leading-relaxed font-medium">
+                                Servisteyim, güvenilirlik, şeffaflık ve erişilebilirlik ilkelerini temel alarak; kullanıcılarının zamandan tasarruf etmelerini ve doğru kişilerle eşleşmelerini sağlayan modern bir iş köprüsüdür.
+                            </p>
+
+                            <h4 className="text-lg font-bold text-gray-800 mt-6 mb-3"></h4>
+                            <ul className="space-y-2 text-sm">
+                            </ul>
+
+                            <h4 className="text-lg font-bold text-gray-800 mt-6 mb-3">İletişim</h4>
+                            <p className="text-sm">
+                                Sorularınız veya önerileriniz için bize ulaşabilirsiniz:<br />
+                                📧 E-posta: Buraya e posya adresi yazılacak<br />
+                                📱 Telefon: Buraya telefon numarası yazılacak
+                            </p>
+
+                            <div className="bg-indigo-50 border border-indigo-200 rounded-lg p-4 mt-6">
+                                <p className="text-sm text-indigo-800 font-medium">
+                                    💡 İpucu: Profil doğrulamalarınızı tamamlayarak güvenilirliğinizi artırabilir ve 
+                                    daha fazla kullanıcıya ulaşabilirsiniz!
+                                </p>
+                            </div>
+                        </div>
+
+                        <div className="text-center text-xs text-gray-500 pt-6 border-t border-gray-200">
+                            <p>© 2024 Servisteyim. Tüm hakları saklıdır.</p>
+                            <p className="mt-1">Versiyon 2.0</p>
+                        </div>
+                    </div>
+                </div>
+            );
+        }
+
+        // ==================== MAIN APP ====================
+        function MainApp({ currentUser, onLogout, onProfileUpdate }) {
+            const [currentTab, setCurrentTab] = useState('ana-akis');
+            const [showProfileMenu, setShowProfileMenu] = useState(false);
+            const [showProfileEdit, setShowProfileEdit] = useState(false);
+            const [editingPost, setEditingPost] = useState(null);
+            const [refreshKey, setRefreshKey] = useState(0);
+
+            const handlePostCreated = () => {
+                setCurrentTab('ana-akis');
+                setRefreshKey(prev => prev + 1);
+            };
+
+            const handleEditPost = (post) => {
+                setEditingPost(post);
+                setCurrentTab('ilan-ver');
+            };
+
+            const handleCancelEdit = () => {
+                setEditingPost(null);
+                setCurrentTab('ana-akis');
+                setRefreshKey(prev => prev + 1);
+            };
+
+            const isAdmin = currentUser.phoneOrEmail === 'admin@admin.com';
+
+            return (
+                <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100">
+                    {/* Header */}
+                    <header className="sticky top-0 bg-white border-b border-gray-200 shadow-md z-40">
+                        <div className="flex items-center justify-between p-4">
+                            <div className="flex items-center gap-3">
+                                <div className="w-10 h-10 bg-indigo-600 rounded-full flex items-center justify-center">
+                                    <span className="text-2xl"></span>
+                                </div>
+                                <h1 className="text-xl font-bold text-gray-800">Servisteyim</h1>
+                            </div>
+                            <div className="relative">
+                                <button 
+                                    onClick={() => setShowProfileMenu(!showProfileMenu)}
+                                    className="flex items-center gap-2 hover:bg-gray-100 rounded-lg p-2"
+                                >
+                                    {currentUser.profileImage ? (
+                                        <img src={currentUser.profileImage} alt="Profile" className="w-8 h-8 rounded-full object-cover" />
+                                    ) : (
+                                        <div className="w-8 h-8 rounded-full bg-gray-200 flex items-center justify-center">
+                                            <span className="text-lg">👤</span>
+                                        </div>
+                                    )}
+                                </button>
+                                {showProfileMenu && (
+                                    <div className="absolute right-0 mt-2 w-64 bg-white rounded-xl shadow-xl border border-gray-200 py-2">
+                                        <div className="px-4 py-3 border-b border-gray-200">
+                                            <div className="flex items-center gap-3 mb-2">
+                                                {currentUser.profileImage ? (
+                                                    <img src={currentUser.profileImage} alt="Profile" className="w-12 h-12 rounded-full object-cover" />
+                                                ) : (
+                                                    <div className="w-12 h-12 rounded-full bg-gray-200 flex items-center justify-center">
+                                                        <span className="text-2xl">👤</span>
+                                                    </div>
+                                                )}
+                                                <div>
+                                                    <p className="text-sm font-bold text-gray-800">
+                                                        {currentUser.name} {currentUser.surname}
+                                                        {currentUser.isSponsored && (
+                                                            <span className="ml-1 sponsored-badge text-xs font-bold text-white px-1 py-0.5 rounded">⭐</span>
+                                                        )}
+                                                    </p>
+                                                    <p className="text-xs text-gray-600">{currentUser.phoneOrEmail}</p>
+                                                </div>
+                                            </div>
+                                            <button 
+                                                onClick={() => {
+                                                    setShowProfileMenu(false);
+                                                    setShowProfileEdit(true);
+                                                }}
+                                                className="w-full bg-indigo-600 text-white py-2 px-4 rounded-lg text-sm font-medium hover:bg-indigo-700 mt-2"
+                                            >
+                                                ✏️ Profili Düzenle
+                                            </button>
+                                        </div>
+                                        <button 
+                                            onClick={() => {
+                                                setShowProfileMenu(false);
+                                                setCurrentTab('ilanlarim');
+                                            }}
+                                            className="w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-gray-100"
+                                        >
+                                            📋 İlanlarım
+                                        </button>
+                                        <button 
+                                            onClick={() => {
+                                                setShowProfileMenu(false);
+                                                setCurrentTab('mesajlar');
+                                            }}
+                                            className="w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-gray-100"
+                                        >
+                                            💬 Mesajlarım
+                                        </button>
+                                        <button 
+                                            onClick={() => {
+                                                setShowProfileMenu(false);
+                                                setCurrentTab('favoriler');
+                                            }}
+                                            className="w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-gray-100"
+                                        >
+                                            ❤️ Favorilerim
+                                        </button>
+                                        {isAdmin && (
+                                            <button 
+                                                onClick={() => {
+                                                    setShowProfileMenu(false);
+                                                    setCurrentTab('admin');
+                                                }}
+                                                className="w-full text-left px-4 py-2 text-sm text-purple-700 hover:bg-purple-50 font-medium"
+                                            >
+                                                🛡️ Admin Paneli
+                                            </button>
+                                        )}
+                                        <button 
+                                            onClick={() => {
+                                                setShowProfileMenu(false);
+                                                onLogout();
+                                            }}
+                                            className="w-full text-left px-4 py-2 text-sm text-red-600 hover:bg-red-50"
+                                        >
+                                            🚪 Çıkış Yap
+                                        </button>
+                                    </div>
+                                )}
+                            </div>
+                        </div>
+                    </header>
+
+                    {/* Main Content */}
+                    <main className="p-4">
+                        {currentTab === 'ana-akis' && (
+                            <div>
+                                <FuelPrices />
+                                <div className="mb-4">
+                                    <h2 className="text-2xl font-bold text-gray-800 mb-4 flex items-center gap-2">
+                                        <HomeIcon />
+                                        Aktif İlanlar
+                                    </h2>
+                                </div>
+                                <JobPostsList key={refreshKey} currentUser={currentUser} onEditPost={handleEditPost} />
+                            </div>
+                        )}
+                        {currentTab === 'ilan-ver' && (
+                            <JobPostForm 
+                                currentUser={currentUser} 
+                                onPostCreated={handlePostCreated} 
+                                editingPost={editingPost} 
+                                onCancelEdit={handleCancelEdit} 
+                            />
+                        )}
+                        {currentTab === 'ilanlarim' && <MyPosts currentUser={currentUser} onEditPost={handleEditPost} />}
+                        {currentTab === 'mesajlar' && <MessagesPage currentUser={currentUser} />}
+                        {currentTab === 'favoriler' && <FavoritesPage currentUser={currentUser} />}
+                        {currentTab === 'hakkinda' && <AboutPage />}
+                        {currentTab === 'admin' && isAdmin && <AdminPanel currentUser={currentUser} />}
+                    </main>
+
+                    {/* Bottom Navigation */}
+                    <nav className="fixed bottom-0 left-0 right-0 bg-white border-t border-gray-200 shadow-lg">
+                        <div className="flex justify-around items-center h-16">
+                            <button 
+                                onClick={() => setCurrentTab('ana-akis')} 
+                                className={`flex flex-col items-center justify-center flex-1 h-full ${currentTab === 'ana-akis' ? 'text-indigo-600 bg-indigo-50' : 'text-gray-600'}`}
+                            >
+                                <HomeIcon />
+                                <span className="text-xs font-medium">Ana Akış</span>
+                            </button>
+                            <button 
+                                onClick={() => setCurrentTab('ilan-ver')} 
+                                className={`flex flex-col items-center justify-center flex-1 h-full ${currentTab === 'ilan-ver' ? 'text-indigo-600 bg-indigo-50' : 'text-gray-600'}`}
+                            >
+                                <PlusIcon />
+                                <span className="text-xs font-medium">İlan Ver</span>
+                            </button>
+                            <button 
+                                onClick={() => setCurrentTab('ilanlarim')} 
+                                className={`flex flex-col items-center justify-center flex-1 h-full ${currentTab === 'ilanlarim' ? 'text-indigo-600 bg-indigo-50' : 'text-gray-600'}`}
+                            >
+                                <UserIcon />
+                                <span className="text-xs font-medium">İlanlarım</span>
+                            </button>
+                            <button 
+                                onClick={() => setCurrentTab('hakkinda')} 
+                                className={`flex flex-col items-center justify-center flex-1 h-full ${currentTab === 'hakkinda' ? 'text-indigo-600 bg-indigo-50' : 'text-gray-600'}`}
+                            >
+                                <InfoIcon />
+                                <span className="text-xs font-medium">Hakkında</span>
+                            </button>
+                        </div>
+                    </nav>
+
+                    {showProfileEdit && (
+                        <ProfileEdit 
+                            currentUser={currentUser} 
+                            onProfileUpdate={(updatedUser) => {
+                                onProfileUpdate(updatedUser);
+                                setShowProfileEdit(false);
+                            }}
+                            onClose={() => setShowProfileEdit(false)}
+                        />
+                    )}
+                </div>
+            );
+        }
+
+        // ==================== ROOT APP ====================
+        function App() {
+            const [dbReady, setDbReady] = useState(false);
+            const [currentUser, setCurrentUser] = useState(() => {
+                const saved = sessionStorage.getItem('currentUser');
+                return saved ? JSON.parse(saved) : null;
+            });
+
+            useEffect(() => {
+                db.init().then(async () => {
+                    // Create admin user if not exists
+                    const adminUser = await db.getUserByPhoneOrEmail('admin@admin.com');
+                    if (!adminUser) {
+                        const admin = {
+                            id: generateId(),
+                            phoneOrEmail: 'admin@admin.com',
+                            password: 'admin123',
+                            name: 'Admin',
+                            surname: 'User',
+                            about: 'Servisteyim Yöneticisi',
+                            profileImage: null,
+                            emailVerified: true,
+                            phoneVerified: true,
+                            idVerified: true,
+                            isSponsored: true,
+                            licenseClass: '',
+                            vehicleSeats: '',
+                            vehicleType: '',
+                            experienceYears: '',
+                            createdAt: new Date().toISOString()
+                        };
+                        await db.addUser(admin);
+                        console.log('✅ Admin kullanıcısı oluşturuldu');
+                    }
+                    
+                    setDbReady(true);
+                    console.log('✅ Servisteyim Database hazır!');
+                }).catch(err => {
+                    console.error('❌ Database başlatılamadı:', err);
+                });
+            }, []);
+
+            useEffect(() => {
+                if (currentUser) {
+                    sessionStorage.setItem('currentUser', JSON.stringify(currentUser));
+                } else {
+                    sessionStorage.removeItem('currentUser');
+                }
+            }, [currentUser]);
+
+            const handleLogin = (user) => {
+                setCurrentUser(user);
+            };
+
+            const handleLogout = () => {
+                setCurrentUser(null);
+                sessionStorage.removeItem('currentUser');
+            };
+
+            const handleProfileUpdate = (updatedUser) => {
+                setCurrentUser(updatedUser);
+            };
+
+            if (!dbReady) {
+                return (
+                    <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 flex items-center justify-center">
+                        <div className="text-center">
+                            <div className="animate-spin rounded-full h-16 w-16 border-b-4 border-indigo-600 mx-auto mb-4"></div>
+                            <p className="text-gray-600 font-medium">Servisteyim yükleniyor...</p>
+                        </div>
+                    </div>
+                );
+            }
+
+            if (!currentUser) {
+                return <AuthPanel onLogin={handleLogin} />;
+            }
+
+            return <MainApp currentUser={currentUser} onLogout={handleLogout} onProfileUpdate={handleProfileUpdate} />;
+        }
+
+        // Render
+        ReactDOM.render(<App />, document.getElementById('root'));
+    </script>
+</body>
+</html>
